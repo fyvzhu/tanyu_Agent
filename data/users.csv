@@ -1,0 +1,16 @@
+﻿user_id,username,nickname,phone_number,email,level,created_at,password
+U0001,li_ming88,李明,13800138001,liming88@example.com,PLUS,2025/10/7 18:24,Limi01Aa!26
+U0002,wang_xin23,王欣,13900139012,wangxin23@example.com,普通会员,2025/11/19 13:32,Wang02Bb!26
+U0003,chenyu_07,陈宇,13700137023,chenyu07@example.com,PLUS,2025/8/16 15:42,Chen03Cc!26
+U0004,zhao_qian99,赵倩,13600136034,zhaoqian99@example.com,普通会员,2025/10/18 19:35,Zhao04Dd!26
+U0005,sunhao_520,孙浩,13500135045,sunhao520@example.com,PLUS,2025/11/11 11:11,Sunh05Ee!26
+U0006,zhou_ning17,周宁,18800188056,zhouning17@example.com,普通会员,2026/1/30 18:29,Zhou06Ff!26
+U0007,wu_tong66,吴桐,18700187067,wutong66@example.com,PLUS,2026/2/11 16:52,Wuto07Gg!26
+U0008,zheng_kai31,郑凯,18600186078,zhengkai31@example.com,普通会员,2026/3/19 8:51,Zhen08Hh!26
+U0009,feng_yue08,冯悦,18500185089,fengyue08@example.com,PLUS,2026/3/9 17:19,Feng09Ii!26
+U0010,hejun_2026,何俊,18400184090,hejun2026@example.com,普通会员,2025/11/27 11:01,Heju10Jj!26
+U0011,gao_lin45,高琳,18300183101,gaolin45@example.com,PLUS,2026/3/14 13:01,Gaol11Kk!26
+U0012,lin_chen21,林晨,18200182112,linchen21@example.com,普通会员,2026/1/2 12:26,Linc12Ll!26
+U0013,xu_jia77,徐佳,18100181123,xujia77@example.com,PLUS,2025/11/7 15:34,Xuji13Mm!26
+U0014,guo_yang15,郭洋,18000180134,guoyang15@example.com,普通会员,2026/1/14 17:07,Guoy14Nn!26
+U0015,tang_wei52,唐薇,18900189145,tangwei52@example.com,PLUS,2026/1/4 17:13,Tang15Oo!26

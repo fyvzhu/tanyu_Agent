@@ -1,0 +1,99 @@
+{
+  "docset_version": "v7.0",
+  "status": "DEVELOPER_HANDOFF_FINAL",
+  "generated_at": "2026-09-22",
+  "scope": "README + Vertical Slice 00-08 + final delivery audit",
+  "contract_summary": {
+    "business_intents": 9,
+    "business_tools": 8,
+    "intent_flows": 9,
+    "langgraph_nodes": 5,
+    "size_algorithm": "Range-Based Size Recommendation",
+    "size_range_semantics": "[min,max)",
+    "size_rule_storage": "products.size_recommendation_rules JSON NULL",
+    "p0_open": 0,
+    "p1_open": 0,
+    "final_audit_checks": 128,
+    "final_audit_failures": 0
+  },
+  "files": [
+    {
+      "file": "README_FINAL_VERTICAL_SLICE_DOCSET.md",
+      "lines": 113,
+      "bytes": 4584,
+      "sha256": "f5274b9eea930702b41570591a8ccf9ce92ce1ae5f604d3dc019bf6cf42509c1",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "00_overall_architecture_living_contract.md",
+      "lines": 860,
+      "bytes": 17499,
+      "sha256": "2368d305d6476d0b28ebd1b4eceab30a3147680d926fb04a9cc35dceeabceb9a",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "01_slice_foundation_auth_chat_agent_runtime.md",
+      "lines": 1270,
+      "bytes": 26710,
+      "sha256": "833d3cc7a452e4798a6588807a234f87cdf12487601a9c7bc79143bdd5635f6b",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "02_slice_product_promotion_conversion.md",
+      "lines": 992,
+      "bytes": 14738,
+      "sha256": "dc544ce708f6c0fc7dc722e352bdc55f475addd7990ed27fc5bd01821347e5b0",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "03_slice_size_recommendation_measurements.md",
+      "lines": 1657,
+      "bytes": 24784,
+      "sha256": "40905d09d8bcafca4e6c19713e0abfeea16c22f705c78ba7f648efbe88b780d6",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "04_slice_order_logistics_shipping_aftersale.md",
+      "lines": 810,
+      "bytes": 13662,
+      "sha256": "a737821d56072371fb0a38522032c5fd922729df024978af494df160d3adfb54",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "05_slice_memory_personalization_isolation.md",
+      "lines": 736,
+      "bytes": 12568,
+      "sha256": "1be83d1d0b257e9ab813eab593c3f78f3eb9473ee6e6a87f40ba90126c1b9c48",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "06_slice_guardrails_langfuse_sse_finalization.md",
+      "lines": 807,
+      "bytes": 13039,
+      "sha256": "478ea7928b0e74a2981e7267263f0779cb3d53eaa7e1992151edb48be49619d5",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "07_api_runtime_contract.md",
+      "lines": 1321,
+      "bytes": 19422,
+      "sha256": "f3328851932ba8418d4509383807ef018634bfa96237a23808de1a476200da30",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "08_cross_service_e2e_eval.md",
+      "lines": 1004,
+      "bytes": 14713,
+      "sha256": "49d09b774b9910157db35d05cd0a0dbed202db11c2ae9d02ea634dc001d44cc2",
+      "markdown_fences_balanced": true
+    },
+    {
+      "file": "DELIVERY_AUDIT_REPORT_v7_0_FINAL.md",
+      "lines": 421,
+      "bytes": 9301,
+      "sha256": "0224c1f1b92b51240c56009ebbe27f74b909c85eccfb3104629a7d18310ad4b6",
+      "markdown_fences_balanced": true
+    }
+  ],
+  "manifest_note": "The manifest does not hash itself. Hashes/line/byte counts refer to the exact final files in this package."
+}

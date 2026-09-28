@@ -1,0 +1,321 @@
+version: '3.8'
+
+services:
+  # ==================== MySQL 数据库 ====================
+  mysql:
+    image: mysql:8.4
+    container_name: tanyu-ecommerce-mysql
+    restart: unless-stopped
+    ports:
+      - "43306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: 618618
+      MYSQL_DATABASE: ecommerce_db
+      MYSQL_USER: zhutou
+      MYSQL_PASSWORD: 618618
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - tanyu_ecommerce_mysql_data:/var/lib/mysql
+      - ./mysql/initdb:/docker-entrypoint-initdb.d
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p618618"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== Redis 缓存 ====================
+  redis:
+    image: redis:7-alpine
+    container_name: tanyu-ecommerce-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass 618618
+    volumes:
+      - tanyu_ecommerce_redis_data:/data
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ==================== Qdrant 向量检索 ====================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: tanyu-ecommerce-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - tanyu_ecommerce_qdrant_data:/qdrant/storage
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ==================== Elasticsearch 全文检索（带IK中文分词） ====================
+  elasticsearch:
+    build: ./elasticsearch
+    container_name: tanyu-ecommerce-elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - tanyu_ecommerce_es_data:/usr/share/elasticsearch/data
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ==================== Kibana 可视化管理 ====================
+  kibana:
+    image: kibana:8.19.10
+    container_name: tanyu-ecommerce-kibana
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ==================== Embedding服务 (BGE-M3) ====================
+  # Phase 1 不需要，Phase 2 再启用
+  # embedding:
+  #   build:
+  #     context: ./embedding
+  #     dockerfile: Dockerfile
+  #   container_name: tanyu-ecommerce-embedding
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8100:8000"
+  #   volumes:
+  #     - ./embedding/bge-m3:/models/bge-m3:ro
+  #   networks:
+  #     - tanyu-network
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+
+  # ==================== Langfuse PostgreSQL ====================
+  langfuse-db:
+    image: postgres:15-alpine
+    container_name: tanyu-ecommerce-langfuse-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: langfuse
+    volumes:
+      - tanyu_ecommerce_langfuse_db_data:/var/lib/postgresql/data
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== ClickHouse（Langfuse v3 需要） ====================
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: tanyu-ecommerce-clickhouse
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse618
+    volumes:
+      - tanyu_ecommerce_clickhouse_data:/var/lib/clickhouse
+      - tanyu_ecommerce_clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  # ==================== MinIO 对象存储（Langfuse v3 需要） ====================
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: tanyu-ecommerce-minio
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server /data --console-address ":9001"'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret618
+    ports:
+      - "9090:9000"
+      - "9091:9001"
+    volumes:
+      - tanyu_ecommerce_minio_data:/data
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ==================== Langfuse Worker（后台任务处理） ====================
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: tanyu-ecommerce-langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      NEXTAUTH_URL: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-db:5432/langfuse
+      SALT: tanyu-langfuse-salt-2026
+      ENCRYPTION_KEY: d340fe562c62f96590310106caaf10d2aa8c5a85c56fbab54243a609319c26cc
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse618
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_USE_AZURE_BLOB: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret618
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret618
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: 618618
+      REDIS_TLS_ENABLED: "false"
+    networks:
+      - tanyu-network
+
+  # ==================== Langfuse Web（前端界面） ====================
+  langfuse:
+    image: langfuse/langfuse:3
+    container_name: tanyu-ecommerce-langfuse
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: tanyu-langfuse-secret-2026
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-db:5432/langfuse
+      SALT: tanyu-langfuse-salt-2026
+      ENCRYPTION_KEY: d340fe562c62f96590310106caaf10d2aa8c5a85c56fbab54243a609319c26cc
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse618
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_USE_AZURE_BLOB: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret618
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret618
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: 618618
+      REDIS_TLS_ENABLED: "false"
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/public/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  tanyu_ecommerce_mysql_data:
+    name: tanyu_ecommerce_mysql_data
+  tanyu_ecommerce_redis_data:
+    name: tanyu_ecommerce_redis_data
+  tanyu_ecommerce_qdrant_data:
+    name: tanyu_ecommerce_qdrant_data
+  tanyu_ecommerce_es_data:
+    name: tanyu_ecommerce_es_data
+  tanyu_ecommerce_langfuse_db_data:
+    name: tanyu_ecommerce_langfuse_db_data
+  tanyu_ecommerce_clickhouse_data:
+    name: tanyu_ecommerce_clickhouse_data
+  tanyu_ecommerce_clickhouse_logs:
+    name: tanyu_ecommerce_clickhouse_logs
+  tanyu_ecommerce_minio_data:
+    name: tanyu_ecommerce_minio_data
+
+networks:
+  tanyu-network:
+    name: tanyu-network
+    driver: bridge

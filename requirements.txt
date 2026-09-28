@@ -1,0 +1,35 @@
+# ==================== 核心框架 ====================
+fastapi[standard]==0.141.1
+uvicorn[standard]==0.52.1
+pydantic==2.13.4
+pydantic-settings==2.14.2
+
+# ==================== 数据库（异步） ====================
+sqlalchemy[asyncio]==2.0.51
+aiomysql==0.3.2
+cryptography==48.0.1
+
+# ==================== 安全认证 ====================
+python-jose==3.5.0
+argon2-cffi==25.1.0
+passlib[bcrypt]==5.0.0
+
+# ==================== 日志 ====================
+loguru==0.7.3
+
+# ==================== 数据处理（导入脚本用，可以同步） ====================
+pandas==3.0.5
+pymysql==1.2.0
+python-multipart==0.0.32
+
+# ==================== Phase 2 预留依赖 ====================
+redis==5.0.8
+qdrant-client==1.11.2
+elasticsearch==8.15.1
+sentence-transformers==6.0.1
+torch==2.14.0
+
+# ==================== 测试 ====================
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1
