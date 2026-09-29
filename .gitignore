@@ -47,10 +47,6 @@ Thumbs.db
 htmlcov/
 .tox/
 
-# ==================== Data ====================
-# 数据文件（CSV、图片等）
-data/
-
 # ==================== Docker & Models ====================
 # BGE-M3 模型文件（几个G，不提交到Git）
 docker/embedding/bge-m3/

@@ -103,25 +103,26 @@ services:
       timeout: 10s
       retries: 5
 
-  # ==================== Embedding服务 (BGE-M3) ====================
-  # Phase 1 不需要，Phase 2 再启用
-  # embedding:
-  #   build:
-  #     context: ./embedding
-  #     dockerfile: Dockerfile
-  #   container_name: tanyu-ecommerce-embedding
-  #   restart: unless-stopped
-  #   ports:
-  #     - "8100:8000"
-  #   volumes:
-  #     - ./embedding/bge-m3:/models/bge-m3:ro
-  #   networks:
-  #     - tanyu-network
-  #   healthcheck:
-  #     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
+  # ==================== Embedding服务 (BGE-M3 via sentence-transformers) ====================
+  embedding:
+    build:
+      context: ./embedding
+      dockerfile: Dockerfile
+    image: tanyu-ecommerce-embedding:latest
+    container_name: tanyu-ecommerce-embedding
+    restart: unless-stopped
+    ports:
+      - "8100:80"
+    volumes:
+      - ./embedding/bge-m3:/models/bge-m3:ro
+    networks:
+      - tanyu-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # ==================== Langfuse PostgreSQL ====================
   langfuse-db:
