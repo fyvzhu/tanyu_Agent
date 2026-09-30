@@ -158,7 +158,7 @@ class AfterSaleService:
             raise ValueError("目标 SKU 不存在")
         if exchange_sku.product_id != data.product_id:
             raise ValueError("目标 SKU 不属于同一商品")
-        if exchange_sku.stock_status != "有货":
+        if exchange_sku.stock_status != "in_stock":
             raise ValueError("目标 SKU 无库存")
 
         existing_return = await self.return_repo.get_active_by_order_and_sku(data.order_id, data.original_sku_id)

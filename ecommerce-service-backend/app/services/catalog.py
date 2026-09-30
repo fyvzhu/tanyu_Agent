@@ -93,7 +93,7 @@ class CatalogService:
                 and (not size or sku.size_code == size)
                 and (min_price is None or sku.price >= min_price)
                 and (max_price is None or sku.price <= max_price)
-                and (not in_stock or sku.stock_status == "有货")
+                and (not in_stock or sku.stock_status == "in_stock")
             ]
 
             default_sku = filtered_skus[0] if filtered_skus else None
@@ -382,3 +382,227 @@ class CatalogService:
             促销信息列表
         """
         return await self.get_active_promotions(product_id=product_id, member_level=member_level)
+
+    # ==================== 公开 API 方法（返回公开 Schema） ====================
+
+    def _compute_category(self, product) -> str:
+        """计算统一的分类字段（从最细到最粗）"""
+        return product.type or product.sub_category or product.master_category or "未分类"
+
+    def _compute_main_image_url(self, product_id: str) -> str:
+        """计算主图 URL"""
+        return f"/static/main-images/{product_id}.jpg"
+
+    def _compute_size_image_url(self, product_id: str) -> str | None:
+        """计算尺码图 URL（如果存在）"""
+        # 可以检查文件是否存在，但这里先简单返回
+        return f"/static/size-images/{product_id}.jpg"
+
+    async def get_product_detail_public(self, product_id: str):
+        """
+        获取公开的商品详情（带统一字段）
+
+        Returns:
+            ProductPublic 或 None
+        """
+        from app.schemas.catalog import ProductPublic
+
+        logger.info(f"获取公开商品详情: product_id={product_id}")
+        product = await self.product_repo.get_by_product_id(product_id)
+        if not product:
+            logger.warning(f"商品不存在: product_id={product_id}")
+            return None
+
+        return ProductPublic(
+            product_id=product.product_id,
+            brand=product.brand,
+            product_display_name=product.product_display_name,
+            gender=product.gender,
+            category=self._compute_category(product),
+            main_image_url=self._compute_main_image_url(product.product_id),
+            material=product.material,
+            selling_points=product.selling_points,
+            size_data=product.size_data,
+        )
+
+    async def search_products_public(
+        self,
+        q: str | None = None,
+        brand: str | None = None,
+        category: str | None = None,
+        color: str | None = None,
+        size: str | None = None,
+        min_price: Decimal | None = None,
+        max_price: Decimal | None = None,
+        in_stock: bool = True,
+        page: int = 1,
+        page_size: int = 20,
+    ):
+        """
+        搜索商品（返回公开的商品列表项）
+
+        Returns:
+            ProductItems
+        """
+        from app.schemas.catalog import ProductListItem, ProductItems, StockStatus
+
+        logger.info(f"搜索公开商品: q={q}, brand={brand}, category={category}")
+
+        # 获取符合条件的商品 ID
+        product_ids = await self.product_repo.search_product_ids_with_sku_filter(
+            q=q, brand=brand, category=category, color=color, size=size,
+            min_price=min_price, max_price=max_price, in_stock=in_stock,
+        )
+
+        total = len(product_ids)
+        skip = (page - 1) * page_size
+        paginated_product_ids = product_ids[skip:skip + page_size]
+
+        items = []
+        for product_id in paginated_product_ids:
+            product = await self.product_repo.get_by_product_id(product_id)
+            if not product:
+                continue
+
+            # 获取该商品的所有 SKU 计算价格范围和库存
+            skus = await self.sku_repo.get_by_product_id(product_id)
+            if not skus:
+                continue
+
+            prices = [sku.price for sku in skus]
+            has_stock = any(sku.stock_status == StockStatus.IN_STOCK.value for sku in skus)
+
+            items.append(ProductListItem(
+                product_id=product.product_id,
+                brand=product.brand,
+                product_display_name=product.product_display_name,
+                category=self._compute_category(product),
+                main_image_url=self._compute_main_image_url(product.product_id),
+                min_price=min(prices),
+                max_price=max(prices),
+                has_stock=has_stock,
+            ))
+
+        logger.info(f"搜索完成: 总共 {total} 个结果，返回第 {page} 页（{len(items)} 项）")
+        return ProductItems(items=items, total=total)
+
+    async def get_product_skus_public(self, product_id: str):
+        """
+        获取商品的公开 SKU 列表
+
+        Returns:
+            SkuItems
+        """
+        from app.schemas.catalog import SkuPublic, SkuItems, StockStatus
+
+        logger.info(f"获取公开SKU列表: product_id={product_id}")
+        skus = await self.sku_repo.get_by_product_id(product_id)
+
+        items = [
+            SkuPublic(
+                sku_id=sku.sku_id,
+                product_id=sku.product_id,
+                color=sku.color,
+                size_code=sku.size_code,
+                price=sku.price,
+                stock_status=StockStatus(sku.stock_status),
+            )
+            for sku in skus
+        ]
+
+        return SkuItems(items=items)
+
+    async def filter_skus_public(
+        self,
+        product_ids: list[str],
+        colors: list[str] | None = None,
+        sizes: list[str] | None = None,
+        in_stock: bool | None = None,
+    ):
+        """
+        批量过滤 SKU（公开版本）
+
+        Returns:
+            SkuItems
+        """
+        from app.schemas.catalog import SkuPublic, SkuItems, StockStatus
+
+        logger.info(f"批量过滤SKU: product_ids={product_ids}, colors={colors}, sizes={sizes}, in_stock={in_stock}")
+
+        all_skus = []
+        for product_id in product_ids:
+            skus = await self.sku_repo.get_by_product_id(product_id)
+            all_skus.extend(skus)
+
+        # 应用过滤条件
+        filtered = all_skus
+        if colors:
+            filtered = [sku for sku in filtered if sku.color in colors]
+        if sizes:
+            filtered = [sku for sku in filtered if sku.size_code in sizes]
+        if in_stock is not None:
+            target_status = StockStatus.IN_STOCK.value if in_stock else StockStatus.OUT_OF_STOCK.value
+            filtered = [sku for sku in filtered if sku.stock_status == target_status]
+
+        items = [
+            SkuPublic(
+                sku_id=sku.sku_id,
+                product_id=sku.product_id,
+                color=sku.color,
+                size_code=sku.size_code,
+                price=sku.price,
+                stock_status=StockStatus(sku.stock_status),
+            )
+            for sku in filtered
+        ]
+
+        return SkuItems(items=items)
+
+    async def get_active_promotions_public(
+        self,
+        product_id: str,
+        member_level: str | None = None,
+        at: datetime | None = None,
+    ):
+        """
+        获取商品的公开促销信息
+
+        Returns:
+            PromotionItems
+        """
+        from app.schemas.catalog import PromotionPublic, PromotionItems, PromotionType
+
+        if at is None:
+            at = datetime.now()
+
+        logger.info(f"获取公开促销: product_id={product_id}, member_level={member_level}")
+        promotions = await self.promotion_repo.get_active_promotions_for_product(
+            product_id=product_id, at=at
+        )
+
+        # 根据会员等级过滤
+        if member_level:
+            promotions = [
+                promo for promo in promotions
+                if promo.member_level in (member_level, "ALL", None)
+            ]
+
+        items = [
+            PromotionPublic(
+                promotion_id=promo.promotion_id,
+                title=promo.promotion_name,
+                promotion_type=PromotionType(promo.promotion_type),
+                description=promo.description,
+                start_at=promo.start_at,
+                end_at=promo.end_at,
+                applicable=True,  # 已过滤，所以都适用
+                discount_rate=promo.discount_rate,
+                discount_amount=promo.discount_amount,
+                threshold_amount=promo.threshold_amount,
+                promo_price=promo.promo_price,
+            )
+            for promo in promotions
+        ]
+
+        return PromotionItems(items=items)
+

@@ -49,7 +49,7 @@ class ProductSKU(Base):
     color: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="颜色")
     size_code: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="尺码代码: S/M/L/40/41")
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, comment="价格")
-    stock_status: Mapped[str] = mapped_column(String(32), nullable=False, comment="有货/缺货")
+    stock_status: Mapped[str] = mapped_column(String(32), nullable=False, comment="in_stock/out_of_stock")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
     # 关联关系
@@ -64,7 +64,7 @@ class Promotion(Base):
     promotion_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True, comment="PROMO20260001")
     product_id: Mapped[str] = mapped_column(String(64), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True, comment="关联商品")
     promotion_name: Mapped[str] = mapped_column(String(255), nullable=False, comment="促销名称")
-    promotion_type: Mapped[str] = mapped_column(String(50), nullable=False, comment="PERCENT_OFF/FIXED_OFF/FULL_REDUCTION/MEMBER_PRICE")
+    promotion_type: Mapped[str] = mapped_column(String(50), nullable=False, comment="percentage_discount/fixed_discount/threshold_discount/member_price")
     threshold_amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True, comment="满减门槛")
     discount_amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True, comment="减免金额")
     discount_rate: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True, comment="折扣率")

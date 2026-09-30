@@ -35,7 +35,7 @@ async def filter_skus(
       "sizes": ["M"],
       "min_price": null,
       "max_price": "400.00",
-      "stock_status": "有货"
+      "stock_status": "in_stock"
     }
     """
     # 调用 catalog service 的 SKU 筛选逻辑

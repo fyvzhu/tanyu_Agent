@@ -263,7 +263,7 @@ class ProductQueryFlow:
                 "product_id": product_id,
                 "title": candidate.get("product_display_name"),
                 "brand": candidate.get("brand"),
-                "main_image_url": selected_sku.get("image_url"),  # 从 SKU 获取
+                "main_image_url": candidate.get("main_image_url"),  # 从商品详情获取
                 "min_price": selected_sku.get("price"),
                 "max_price": selected_sku.get("price"),
                 "matched_skus": [selected_sku] if selected_sku else [],
@@ -312,6 +312,7 @@ class ProductQueryFlow:
         将原始商品数据转换为 ProductCard 格式
 
         P1-32 修复：确保返回符合 07 Contract 的 ProductCard 格式
+        问题7修复：使用 product["main_image_url"] 而不是 SKU 的 image_url
 
         Args:
             product: 商品详情（来自 Commerce API）
@@ -325,27 +326,24 @@ class ProductQueryFlow:
         min_price = min(prices) if prices else None
         max_price = max(prices) if prices else None
 
-        # 获取主图（使用第一个有货 SKU 的图片，或第一个 SKU）
-        main_image_url = None
+        # 选择默认 SKU（优先选择有货的）
         selected_sku = None
         for sku in skus:
-            if sku.get("stock_status") == "有货":
+            if sku.get("stock_status") == "in_stock":
                 selected_sku = sku
-                main_image_url = sku.get("image_url")
                 break
 
         # 如果没有有货 SKU，使用第一个
         if not selected_sku and skus:
             selected_sku = skus[0]
-            main_image_url = skus[0].get("image_url")
 
-        # 构造 ProductCard
+        # 构造 ProductCard（使用商品的 main_image_url）
         return {
             "type": "product_card",
             "product_id": product.get("product_id"),
             "title": product.get("product_display_name") or product.get("name"),
             "brand": product.get("brand"),
-            "main_image_url": main_image_url,
+            "main_image_url": product.get("main_image_url"),  # 从商品详情获取
             "min_price": min_price,
             "max_price": max_price,
             "matched_skus": skus,

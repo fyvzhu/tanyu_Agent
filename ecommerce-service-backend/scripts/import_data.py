@@ -24,6 +24,19 @@ from app.models import (
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
+# 枚举值映射（CSV -> 数据库）
+STOCK_STATUS_MAP = {
+    "有货": "in_stock",
+    "缺货": "out_of_stock"
+}
+
+PROMOTION_TYPE_MAP = {
+    "PERCENT_OFF": "percentage_discount",
+    "FIXED_OFF": "fixed_discount",
+    "FULL_REDUCTION": "threshold_discount",
+    "MEMBER_PRICE": "member_price"
+}
+
 
 def get_sync_database_url() -> str:
     """Return a sync SQLAlchemy URL for the import script."""
@@ -92,10 +105,18 @@ def import_all_data(session):
     logger.info("导入SKU...")
     df = pd.read_csv(DATA_DIR / "product_skus.csv", encoding="utf-8-sig")
     for _, row in df.iterrows():
+        # 转换库存状态枚举值
+        stock_status = row["stock_status"]
+        if stock_status in STOCK_STATUS_MAP:
+            stock_status = STOCK_STATUS_MAP[stock_status]
+        elif stock_status not in ["in_stock", "out_of_stock"]:
+            logger.warning(f"未知的库存状态值: {stock_status}，跳过该SKU")
+            continue
+
         sku = ProductSKU(
             sku_id=row["sku_id"], product_id=str(row["product_id"]),
             color=row.get("color"), size_code=row.get("size_code"),
-            price=float(row["price"]), stock_status=row["stock_status"],
+            price=float(row["price"]), stock_status=stock_status,
             created_at=datetime.now()
         )
         session.add(sku)
@@ -106,9 +127,17 @@ def import_all_data(session):
     logger.info("导入促销...")
     df = pd.read_csv(DATA_DIR / "promotions.csv", encoding="utf-8-sig")
     for _, row in df.iterrows():
+        # 转换促销类型枚举值
+        promotion_type = row["promotion_type"]
+        if promotion_type in PROMOTION_TYPE_MAP:
+            promotion_type = PROMOTION_TYPE_MAP[promotion_type]
+        elif promotion_type not in ["percentage_discount", "fixed_discount", "threshold_discount", "member_price"]:
+            logger.warning(f"未知的促销类型值: {promotion_type}，跳过该促销")
+            continue
+
         promo = Promotion(
             promotion_id=row["promotion_id"], product_id=str(row["product_id"]),
-            promotion_name=row["promotion_name"], promotion_type=row["promotion_type"],
+            promotion_name=row["promotion_name"], promotion_type=promotion_type,
             threshold_amount=safe_value(row.get("threshold_amount")),
             discount_amount=safe_value(row.get("discount_amount")),
             discount_rate=safe_value(row.get("discount_rate")),

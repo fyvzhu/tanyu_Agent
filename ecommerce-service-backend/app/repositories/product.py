@@ -99,7 +99,7 @@ class ProductRepository(BaseRepository[Product]):
                 query = query.where(ProductSKU.price <= max_price)
 
             if in_stock:
-                query = query.where(ProductSKU.stock_status == "有货")
+                query = query.where(ProductSKU.stock_status == "in_stock")
 
         # Product 级别的过滤
         if q:

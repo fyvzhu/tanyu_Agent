@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -52,9 +54,13 @@ app = FastAPI(
     openapi_tags=openapi_tags,
 )
 
-# 挂载静态文件目录
-app.mount("/static/main-images", StaticFiles(directory="../data/main_images"), name="main_images")
-app.mount("/static/size-images", StaticFiles(directory="../data/size_images"), name="size_images")
+# 计算项目根目录（从 ecommerce-service-backend/app/app.py 向上两级到项目根）
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+
+# 挂载静态文件目录（使用绝对路径）
+app.mount("/static/main-images", StaticFiles(directory=str(DATA_DIR / "main_images")), name="main_images")
+app.mount("/static/size-images", StaticFiles(directory=str(DATA_DIR / "size_images")), name="size_images")
 
 
 def _error_code(status_code: int) -> str:

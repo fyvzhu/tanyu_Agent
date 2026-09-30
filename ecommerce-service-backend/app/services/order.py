@@ -61,7 +61,7 @@ class OrderService:
             if not sku:
                 raise ValueError(f"SKU {item.sku_id} 不存在")
 
-            if sku.stock_status != "有货":
+            if sku.stock_status != "in_stock":
                 raise ValueError(f"SKU {item.sku_id} 已缺货")
 
             item_total = sku.price * item.quantity
