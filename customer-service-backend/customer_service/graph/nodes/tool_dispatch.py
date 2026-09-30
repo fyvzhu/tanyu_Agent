@@ -57,6 +57,16 @@ async def tool_dispatch_node(state: AgentState, config: RunnableConfig) -> Agent
         logger.warning(f"[{session_id}:{turn_id}] ⚠️ 没有 active_task，跳过 Tool Dispatch")
         return state
 
+    # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式
+    if isinstance(active_task, dict):
+        from customer_service.tasking.models import TaskFrame
+        # 检查是否是 LangChain 序列化格式 (包含 'lc', 'type', 'kwargs')
+        if 'kwargs' in active_task and 'lc' in active_task:
+            active_task = TaskFrame(**active_task['kwargs'])
+        else:
+            active_task = TaskFrame(**active_task)
+        state["active_task"] = active_task
+
     # 检查 Task 状态
     if active_task.status != TaskStatus.READY:
         logger.info(f"[{session_id}:{turn_id}] Task 状态为 {active_task.status}，跳过 Tool Dispatch")

@@ -30,9 +30,8 @@ P1-21 修复：
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from loguru import logger
+from langgraph.types import RunnableConfig
 
 from customer_service.graph.state import (
     AgentState,
@@ -45,11 +44,8 @@ from customer_service.intents.models import BusinessIntent
 from customer_service.intents.policies import get_intent_policy
 from customer_service.tasking.models import PendingIntentSelection
 
-if TYPE_CHECKING:
-    from langgraph.types import RunnableConfig
 
-
-async def intent_parse_node(state: AgentState, config: "RunnableConfig") -> AgentState:
+async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentState:
     """
     节点 1: Intent Parse
 
@@ -245,6 +241,16 @@ async def intent_parse_node(state: AgentState, config: "RunnableConfig") -> Agen
     if intent == BusinessIntent.CHITCHAT:
         active_task = state.get("active_task")
         if active_task:
+            # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式
+            if isinstance(active_task, dict):
+                from customer_service.tasking.models import TaskFrame
+                # 检查是否是 LangChain 序列化格式 (包含 'lc', 'type', 'kwargs')
+                if 'kwargs' in active_task and 'lc' in active_task:
+                    active_task = TaskFrame(**active_task['kwargs'])
+                else:
+                    active_task = TaskFrame(**active_task)
+                state["active_task"] = active_task
+
             # 有活跃任务时，闲聊不打断，直接返回
             logger.info(
                 f"[{turn_id}] 💬 检测到闲聊插话，保留原任务: {active_task.intent}"
@@ -279,6 +285,16 @@ async def intent_parse_node(state: AgentState, config: "RunnableConfig") -> Agen
         )
         logger.info(f"[{turn_id}] 🆕 启动新任务: {intent_result.intent}")
     else:
+        # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式
+        if isinstance(active_task, dict):
+            from customer_service.tasking.models import TaskFrame
+            # 检查是否是 LangChain 序列化格式 (包含 'lc', 'type', 'kwargs')
+            if 'kwargs' in active_task and 'lc' in active_task:
+                active_task = TaskFrame(**active_task['kwargs'])
+            else:
+                active_task = TaskFrame(**active_task)
+            state["active_task"] = active_task
+
         # 有 active_task
         if active_task.intent == intent_result.intent:
             # 继续当前任务

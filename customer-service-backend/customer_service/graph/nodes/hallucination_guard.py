@@ -13,15 +13,13 @@ P0 架构修复：
 """
 from __future__ import annotations
 import re
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from loguru import logger
+from langgraph.types import RunnableConfig
 
 from customer_service.graph.state import AgentState
 from customer_service.intents.models import BusinessIntent
-
-if TYPE_CHECKING:
-    from langgraph.types import RunnableConfig
 
 
 def extract_factual_claims(response: str) -> list[str]:
@@ -223,7 +221,7 @@ def calculate_hallucination_score(
     return score, unsupported
 
 
-async def hallucination_guard_node(state: AgentState, config: "RunnableConfig") -> AgentState:
+async def hallucination_guard_node(state: AgentState, config: RunnableConfig) -> AgentState:
     """
     节点 5: Hallucination Guard
 
@@ -247,6 +245,16 @@ async def hallucination_guard_node(state: AgentState, config: "RunnableConfig") 
     if not active_task:
         logger.warning(f"[{turn_id}] ⚠️ 没有 active_task，跳过检查")
         return state
+
+    # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式
+    if isinstance(active_task, dict):
+        from customer_service.tasking.models import TaskFrame
+        # 检查是否是 LangChain 序列化格式 (包含 'lc', 'type', 'kwargs')
+        if 'kwargs' in active_task and 'lc' in active_task:
+            active_task = TaskFrame(**active_task['kwargs'])
+        else:
+            active_task = TaskFrame(**active_task)
+        state["active_task"] = active_task
 
     intent = active_task.intent
 

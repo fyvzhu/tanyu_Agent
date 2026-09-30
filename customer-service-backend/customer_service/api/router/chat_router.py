@@ -215,7 +215,6 @@ async def send_message(
             from customer_service.schemas.foundation import SessionUserContext
             from customer_service.context import AgentRuntimeContext
             from pydantic import SecretStr
-            import time
 
             graph = get_agent_graph()
 

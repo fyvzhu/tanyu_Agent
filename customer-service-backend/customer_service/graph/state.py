@@ -9,7 +9,7 @@ LangGraph AgentState - Slice 01 Foundation
 """
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict, TYPE_CHECKING
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -31,11 +31,6 @@ from customer_service.schemas.foundation import (
     PendingConfirmation,
     SessionUserContext,
 )
-
-
-# TYPE_CHECKING 引入避免循环导入
-if TYPE_CHECKING:
-    from customer_service.flows.models import FlowResult
 
 
 # ==================== TaskTransition（Graph 专用）====================
@@ -139,7 +134,7 @@ class AgentState(TypedDict, total=False):
     turn_id: str
     intent_result: IntentResult | None
     entities: dict[str, Any]
-    flow_result: "FlowResult | None"
+    flow_result: Any  # FlowResult | None - 使用Any避免循环导入
     response_draft: str | None
     task_transition: TaskTransition | None
     completed_task_snapshot: TaskFrame | None

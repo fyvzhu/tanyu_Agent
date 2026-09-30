@@ -18,9 +18,8 @@ P0 架构修复：
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from loguru import logger
+from langgraph.types import RunnableConfig
 
 from customer_service.graph.state import AgentState, TaskStatus
 from customer_service.intents.models import BusinessIntent
@@ -28,11 +27,8 @@ from customer_service.flows.models import FlowResult
 from customer_service.infrastructure.llm import get_llm
 from customer_service.prompts import render_prompt
 
-if TYPE_CHECKING:
-    from langgraph.types import RunnableConfig
 
-
-async def response_gen_node(state: AgentState, config: "RunnableConfig") -> AgentState:
+async def response_gen_node(state: AgentState, config: RunnableConfig) -> AgentState:
     """
     节点 4: Response Gen
 
@@ -59,6 +55,16 @@ async def response_gen_node(state: AgentState, config: "RunnableConfig") -> Agen
         state["fallback_used"] = True
         logger.warning(f"[{turn_id}] ⚠️ 没有 active_task，使用 fallback")
         return state
+
+    # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式
+    if isinstance(active_task, dict):
+        from customer_service.tasking.models import TaskFrame
+        # 检查是否是 LangChain 序列化格式 (包含 'lc', 'type', 'kwargs')
+        if 'kwargs' in active_task and 'lc' in active_task:
+            active_task = TaskFrame(**active_task['kwargs'])
+        else:
+            active_task = TaskFrame(**active_task)
+        state["active_task"] = active_task
 
     # 检查 Task 状态
     task_status = active_task.status

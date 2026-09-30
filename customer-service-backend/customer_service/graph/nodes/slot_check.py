@@ -13,15 +13,11 @@ P0 架构修复：
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from loguru import logger
+from langgraph.types import RunnableConfig
 
 from customer_service.graph.state import AgentState, TaskStatus
 from customer_service.intents.models import BusinessIntent
-
-if TYPE_CHECKING:
-    from langgraph.types import RunnableConfig
 
 
 # 定义每个 Intent 需要的槽位
@@ -87,7 +83,7 @@ def extract_slots_from_state(state: AgentState, intent: BusinessIntent) -> dict[
     return slots
 
 
-async def slot_check_node(state: AgentState, config: "RunnableConfig") -> AgentState:
+async def slot_check_node(state: AgentState, config: RunnableConfig) -> AgentState:
     """
     节点 2: Slot Check
 
@@ -104,6 +100,16 @@ async def slot_check_node(state: AgentState, config: "RunnableConfig") -> AgentS
     if not active_task:
         logger.warning(f"[{turn_id}] ⚠️ 没有 active_task，跳过 Slot Check")
         return state
+
+    # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式
+    if isinstance(active_task, dict):
+        from customer_service.tasking.models import TaskFrame
+        # 检查是否是 LangChain 序列化格式 (包含 'lc', 'type', 'kwargs')
+        if 'kwargs' in active_task and 'lc' in active_task:
+            active_task = TaskFrame(**active_task['kwargs'])
+        else:
+            active_task = TaskFrame(**active_task)
+        state["active_task"] = active_task
 
     intent = active_task.intent
 

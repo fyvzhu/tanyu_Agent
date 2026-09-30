@@ -101,9 +101,14 @@ async def get_chat_repository(
 
 # ==================== TurnLock 依赖注入 ====================
 async def get_turn_lock() -> TurnLock:
-    """依赖注入：TurnLock"""
+    """
+    依赖注入：TurnLock
+
+    使用独立的短期锁超时（60秒），而不是复用checkpoint的长TTL
+    防止进程中断后，同一会话被锁住过长时间
+    """
     redis = get_redis()
-    return TurnLock(redis, lock_timeout=settings.redis_checkpoint_ttl_seconds)
+    return TurnLock(redis, lock_timeout=60)  # 使用60秒短锁，而非checkpoint TTL
 
 
 # ==================== 类型别名（简化注解） ====================

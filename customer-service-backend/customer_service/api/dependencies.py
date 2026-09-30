@@ -11,13 +11,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def init_agent_service():
+async def init_agent_service():
     """
     初始化 Agent 基础设施（Slice 01 Foundation）
 
     职责：
     - 初始化数据库引擎
-    - 初始化 LangGraph
+    - 初始化 LangGraph（异步，调用 asetup()）
     - 构造共享的 ProductRetrievalService（P0-02/P0-03 修复）
     - 注册工具和 Flow
 
@@ -29,9 +29,9 @@ def init_agent_service():
     init_db_engine()
     logger.info("数据库引擎初始化完成")
 
-    # 初始化 LangGraph
+    # 初始化 LangGraph（异步，调用 AsyncRedisSaver.asetup()）
     from customer_service.graph.graph_manager import init_agent_graph
-    init_agent_graph()
+    await init_agent_graph()
     logger.info("Agent Graph 初始化完成")
 
     # ===== P0-02/P0-03 修复：构造共享的 ProductRetrievalService =====

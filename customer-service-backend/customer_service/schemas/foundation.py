@@ -21,9 +21,9 @@ class SessionUserContext(BaseModel):
         default_factory=dict,
         description="Session 级 measurement 覆盖值"
     )
-    confirmed_measurement_fields: set[str] = Field(
-        default_factory=set,
-        description="已确认的 measurement 字段"
+    confirmed_measurement_fields: list[str] = Field(
+        default_factory=list,
+        description="已确认的 measurement 字段（使用 list 而非 set 以支持序列化）"
     )
 
 

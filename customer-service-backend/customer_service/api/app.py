@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
     """
     # 启动时初始化
     init_http_client()
-    init_agent_service()  # 初始化 Agent Service（包含 Graph、Tools、Flows）
+    await init_agent_service()  # 异步初始化 Agent Service（包含 AsyncRedisSaver.asetup()）
 
     yield  # FastAPI 处理请求
 
