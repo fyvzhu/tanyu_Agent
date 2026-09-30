@@ -48,8 +48,38 @@ async def response_gen_node(state: AgentState, config: RunnableConfig) -> AgentS
 
     logger.info(f"[{turn_id}] === 节点 4: Response Gen 开始 ===")
 
+    # 问题4修复: 优先处理 pending_intent_selection 的展示
+    pending_selection = state.get("pending_intent_selection")
+    if pending_selection:
+        # 展示候选意图供用户选择
+        response_draft = _generate_intent_selection_prompt(pending_selection.candidate_intents)
+        state["response_draft"] = response_draft
+        logger.info(f"[{turn_id}] 🔀 生成多意图选择提示")
+        logger.info(f"[{turn_id}] === 节点 4: Response Gen 完成（意图选择）===")
+        return state
+
+    # 问题6修复: 检查是否是本轮恢复的任务
+    resumed_this_turn = state.get("resumed_this_turn", False)
+    task_transition = state.get("task_transition")
+
+    if resumed_this_turn:
+        # 恢复任务时生成明确的提示
+        response_draft = _generate_resume_task_prompt(state, task_transition)
+        state["response_draft"] = response_draft
+        logger.info(f"[{turn_id}] 🔄 生成任务恢复提示")
+        logger.info(f"[{turn_id}] === 节点 4: Response Gen 完成（任务恢复）===")
+        return state
+
+    # 问题4修复: 检查是否是取消操作
     if not active_task:
-        # 没有任务，fallback
+        # 如果是刚取消的任务，生成取消确认
+        if task_transition and task_transition.action == "cancel":
+            response_draft = "好的，已为您取消当前操作。还有什么我可以帮您的吗？"
+            state["response_draft"] = response_draft
+            logger.info(f"[{turn_id}] ✅ 生成取消确认")
+            return state
+
+        # 其他没有任务的情况，fallback
         response_draft = "抱歉，我不太理解您的意思。您可以问我商品信息、促销活动或者订单相关的问题哦～"
         state["response_draft"] = response_draft
         state["fallback_used"] = True
@@ -65,6 +95,18 @@ async def response_gen_node(state: AgentState, config: RunnableConfig) -> AgentS
         else:
             active_task = TaskFrame(**active_task)
         state["active_task"] = active_task
+
+    # 问题6修复：检查是否是闲聊插话
+    # 如果 intent_result 是 CHITCHAT 但 active_task 不是，说明是闲聊插话
+    intent_result = state.get("intent_result")
+    if (intent_result and
+        intent_result.intent == BusinessIntent.CHITCHAT and
+        active_task.intent != BusinessIntent.CHITCHAT):
+        # 闲聊插话，使用闲聊响应
+        response_draft = _generate_chitchat_response(current_message)
+        state["response_draft"] = response_draft
+        logger.info(f"[{turn_id}] 💬 闲聊插话，生成闲聊响应")
+        return state
 
     # 检查 Task 状态
     task_status = active_task.status
@@ -165,20 +207,91 @@ async def _generate_response_from_flow_result(
         return "抱歉，我暂时无法处理这个请求～"
 
 
+def _generate_intent_selection_prompt(candidate_intents: list) -> str:
+    """
+    问题4修复：生成多意图选择提示
+
+    示例输出:
+    "您好！我理解您可能想要：
+    1. 查询商品信息
+    2. 查询促销活动
+    请回复数字选择，或重新描述您的需求～"
+    """
+    from customer_service.tasking.models import BusinessIntent
+
+    # 意图名称映射
+    intent_names = {
+        BusinessIntent.PRODUCT_QUERY: "查询商品信息",
+        BusinessIntent.PROMOTION_QUERY: "查询促销活动",
+        BusinessIntent.SIZE_RECOMMEND: "获取尺码推荐",
+        BusinessIntent.LOGISTICS_QUERY: "查询订单物流",
+        BusinessIntent.RETURN: "申请退货",
+        BusinessIntent.EXCHANGE: "申请换货",
+        BusinessIntent.URGE_ORDER_PAYMENT: "催付订单",
+        BusinessIntent.CHITCHAT: "闲聊",
+    }
+
+    lines = ["您好！我理解您可能想要："]
+    for i, intent in enumerate(candidate_intents, 1):
+        intent_name = intent_names.get(intent, intent.value)
+        lines.append(f"{i}. {intent_name}")
+    lines.append("请回复数字选择，或重新描述您的需求～")
+
+    return "\n".join(lines)
+
+
 def _generate_clarification(intent: BusinessIntent, missing_slots: list[str], message: str) -> str:
-    """生成补槽澄清问题"""
+    """
+    问题5修复：生成针对具体意图的补槽澄清问题
+
+    按照文档要求，每个意图应该有明确的补槽问题，让用户知道应该提供什么信息
+    """
     if not missing_slots:
         return "请问您想了解什么呢？"
 
-    # 根据 Intent 和缺失的槽位生成问题
-    if intent == BusinessIntent.PRODUCT_QUERY:
-        if "product_name" in missing_slots or "category" in missing_slots:
-            return "您想了解哪个商品或品类呢？比如：T恤、运动鞋、连衣裙等～"
-    elif intent == BusinessIntent.SIZE_RECOMMEND:
-        if "height" in missing_slots or "weight" in missing_slots:
-            return "为了给您推荐合适的尺码，请告诉我您的身高和体重～"
+    # 问题5修复：根据意图类型和缺失槽位生成明确的澄清问题
+    if intent == BusinessIntent.PROMOTION_QUERY:
+        if "product_id" in missing_slots:
+            return "请问您想查询哪件商品的优惠活动呢？请提供商品编号或名称～"
 
-    return "能再详细说一下吗？这样我能更好地帮到您～"
+    elif intent == BusinessIntent.PRODUCT_QUERY:
+        if "product_id" in missing_slots:
+            return "请问您想了解哪款商品？可以告诉我商品名称或编号～"
+
+    elif intent == BusinessIntent.SIZE_RECOMMEND:
+        if "product_id" in missing_slots:
+            return "请问您需要推荐哪款商品的尺码？请提供商品编号或名称～"
+        elif "height" in missing_slots or "weight" in missing_slots:
+            return "请告诉我您的身高和体重，我来为您推荐合适的尺码～"
+
+    elif intent == BusinessIntent.LOGISTICS_QUERY:
+        if "order_id" in missing_slots:
+            return "请问您要查询哪个订单的物流信息？请提供订单号～"
+
+    elif intent == BusinessIntent.RETURN:
+        if "order_id" in missing_slots:
+            return "请问您要退货的订单号是多少？"
+
+    elif intent == BusinessIntent.EXCHANGE:
+        if "order_id" in missing_slots:
+            return "请问您要换货的订单号是多少？"
+
+    elif intent == BusinessIntent.URGE_SHIPPING:
+        if "order_id" in missing_slots:
+            return "请问您要催发货的订单号是多少？"
+
+    # 通用补槽提示（仅当上面没有匹配时使用）
+    slot_names = {
+        "product_id": "商品编号",
+        "product_name": "商品名称",
+        "order_id": "订单号",
+        "promotion_type": "优惠类型",
+        "height": "身高",
+        "weight": "体重",
+    }
+
+    missing_names = [slot_names.get(slot, slot) for slot in missing_slots]
+    return f"请提供以下信息：{', '.join(missing_names)}～"
 
 
 def _generate_product_response_from_flow(
@@ -414,3 +527,42 @@ def _generate_chitchat_response(message: str) -> str:
         return "再见！祝您购物愉快，有需要随时找我哦～"
     else:
         return f"收到您的消息。我是探域电商售前助手，可以帮您查询商品信息、促销活动等。有什么需要帮助的吗？"
+
+
+def _generate_resume_task_prompt(state: AgentState, task_transition) -> str:
+    """
+    问题6修复: 生成任务恢复提示
+
+    当完成或取消任务后恢复旧任务时，生成明确的提示
+    """
+    active_task = state.get("active_task")
+
+    if not active_task:
+        return "好的，已处理完毕。还有什么我可以帮您的吗？"
+
+    # 根据任务转移类型生成不同的提示
+    action = task_transition.action if task_transition else "unknown"
+    intent = active_task.intent
+
+    # 意图到中文名称的映射
+    intent_name_map = {
+        BusinessIntent.PRODUCT_QUERY: "商品咨询",
+        BusinessIntent.PROMOTION_QUERY: "促销查询",
+        BusinessIntent.LOGISTICS_QUERY: "物流查询",
+        BusinessIntent.RETURN: "退货申请",
+        BusinessIntent.EXCHANGE: "换货申请",
+        BusinessIntent.URGE_ORDER_PAYMENT: "催拍催付",
+        BusinessIntent.URGE_SHIPPING: "催发货",
+        BusinessIntent.SIZE_RECOMMEND: "尺码推荐",
+        BusinessIntent.CHITCHAT: "闲聊",
+    }
+
+    intent_name = intent_name_map.get(intent, "之前的任务")
+
+    if action == "cancel":
+        return f"好的，已为您取消当前操作。之前的{intent_name}可以继续，请问您想继续吗？"
+    elif action == "complete":
+        return f"好的，已完成。之前的{intent_name}可以继续，请问您还需要什么帮助吗？"
+    else:
+        return f"好的，我们回到之前的{intent_name}。请问您需要什么帮助？"
+

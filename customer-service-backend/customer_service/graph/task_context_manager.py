@@ -26,13 +26,33 @@ from customer_service.intents.models import BusinessIntent
 class TaskContextManager:
     """
     Task Stack 纯确定性管理器
-    
+
     - 不调用 LLM
     - 不访问数据库
     - 只操作 AgentState 中的 Task 栈
     """
-    
+
     MAX_PAUSED_TASKS = 3
+
+    @staticmethod
+    def _ensure_task_frame(task: TaskFrame | dict | None) -> TaskFrame | None:
+        """
+        确保 task 是 TaskFrame 对象，而不是 LangChain 序列化的字典
+
+        从 Redis 恢复时，TaskFrame 会被序列化为：
+        {'lc': 2, 'type': 'constructor', 'id': [...], 'kwargs': {...}}
+        """
+        if task is None:
+            return None
+        if isinstance(task, TaskFrame):
+            return task
+        if isinstance(task, dict):
+            # LangChain 序列化格式
+            if 'kwargs' in task:
+                return TaskFrame(**task['kwargs'])
+            # 普通字典格式
+            return TaskFrame(**task)
+        return task
     
     @staticmethod
     def start_task(
@@ -138,17 +158,19 @@ class TaskContextManager:
     def complete_current(state: AgentState, turn_id: str) -> AgentState:
         """
         完成当前 Task
-        
+
         - 将 active_task 标记为 COMPLETED
         - 如果有 paused_tasks，恢复最近的一个
         """
         if not state.get("active_task"):
             logger.warning("⚠️ [TaskMgr] 没有 active_task，无法完成")
             return state
-        
-        active_task = state["active_task"]
+
+        # 确保 active_task 是 TaskFrame 对象
+        active_task = TaskContextManager._ensure_task_frame(state["active_task"])
         active_task.status = TaskStatus.COMPLETED
         active_task.last_turn_id = turn_id
+        state["active_task"] = active_task
         
         # 保存快照
         state["completed_task_snapshot"] = active_task
@@ -161,8 +183,8 @@ class TaskContextManager:
         # 恢复 paused task
         paused_tasks = state.get("paused_tasks", [])
         if paused_tasks:
-            # LIFO pop
-            resumed_task = paused_tasks.pop()
+            # LIFO pop - 确保反序列化
+            resumed_task = TaskContextManager._ensure_task_frame(paused_tasks.pop())
             resumed_task.status = resumed_task.paused_from_status or TaskStatus.ACTIVE
             resumed_task.paused_from_status = None
             resumed_task.pause_reason = None
@@ -182,10 +204,14 @@ class TaskContextManager:
             state["active_task"] = None
             logger.info("📭 [TaskMgr] 所有任务已完成，无 paused task")
 
+        # 获取新的 active_task 的 task_id（如果有的话）
+        new_active = state.get("active_task")
+        new_task_id = new_active.task_id if new_active else None
+
         state["task_transition"] = TaskTransition(
             action="complete",
             old_task_id=active_task.task_id,
-            new_task_id=state.get("active_task", {}).get("task_id") if state.get("active_task") else None,
+            new_task_id=new_task_id,
             reason="task_completed"
         )
 
@@ -203,9 +229,11 @@ class TaskContextManager:
             logger.warning("⚠️ [TaskMgr] 没有 active_task，无法取消")
             return state
 
-        active_task = state["active_task"]
+        # 确保 active_task 是 TaskFrame 对象
+        active_task = TaskContextManager._ensure_task_frame(state["active_task"])
         active_task.status = TaskStatus.CANCELED
         active_task.last_turn_id = turn_id
+        state["active_task"] = active_task
 
         logger.info(
             f"❌ [TaskMgr] 取消任务: task_id={active_task.task_id}, "
@@ -215,7 +243,8 @@ class TaskContextManager:
         # 恢复 paused task（与 complete 逻辑相同）
         paused_tasks = state.get("paused_tasks", [])
         if paused_tasks:
-            resumed_task = paused_tasks.pop()
+            # 确保 paused_tasks 中的项也是 TaskFrame 对象
+            resumed_task = TaskContextManager._ensure_task_frame(paused_tasks.pop())
             resumed_task.status = resumed_task.paused_from_status or TaskStatus.ACTIVE
             resumed_task.paused_from_status = None
             resumed_task.pause_reason = None
@@ -234,10 +263,14 @@ class TaskContextManager:
             state["active_task"] = None
             logger.info("📭 [TaskMgr] 任务已取消，无 paused task")
 
+        # 获取新的 active_task 的 task_id（如果有的话）
+        new_active = state.get("active_task")
+        new_task_id = new_active.task_id if new_active else None
+
         state["task_transition"] = TaskTransition(
             action="cancel",
             old_task_id=active_task.task_id,
-            new_task_id=state.get("active_task", {}).get("task_id") if state.get("active_task") else None,
+            new_task_id=new_task_id,
             reason=reason
         )
 

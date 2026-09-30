@@ -134,6 +134,12 @@ class IntentClassifier:
         top_intent, top_score = ranked[0]
         second_intent, second_score = ranked[1] if len(ranked) > 1 else (None, None)
 
+        # 问题4调试：输出分类结果
+        from loguru import logger
+        logger.info(f"[IntentClassifier] 输入: '{text[:50]}...'")
+        second_str = f"{second_intent}={second_score:.3f}" if second_score is not None else "None"
+        logger.info(f"[IntentClassifier] Top意图: {top_intent}={top_score:.3f}, Second意图: {second_str}")
+
         # 映射 intent 字符串到 BusinessIntent 枚举
         intent_mapping = {
             "product_query": BusinessIntent.PRODUCT_QUERY,
@@ -162,35 +168,70 @@ class IntentClassifier:
         # 计算 margin（置信度差值）
         margin = (top_score - second_score) if second_score else 1.0
 
-        # P1-21 修复：MULTIPLE_INTENTS 多意图选择机制
-        # 当 top_score >= 0.55 且 margin < 0.15 时，说明 top1 和 top2 太接近
-        # 应该返回 MULTIPLE_INTENTS，让用户下一轮明确选择
-        if top_score >= 0.55 and second_score and margin < 0.15:
+        # 问题4修复：改进多意图判断逻辑
+        # 按照文档要求：区分"一个目标提到多个关键词"和"两个独立目标"
+        # 例如："这件鞋有优惠吗" vs "推荐鞋并查订单物流"
+
+        # 步骤1：检测是否有明确的连接词表示两个独立目标
+        has_independent_goals = _detect_independent_goals(text, top_intent, second_intent)
+        logger.info(f"[IntentClassifier] 独立目标检测: {has_independent_goals}, margin={margin:.3f}")
+
+        # 步骤2：如果检测到独立目标连接词，且第二个意图分数达到基本阈值（0.15），
+        # 就认为是多意图，而不要求 margin 必须很小
+        # 这是因为用户明确说了"并且"等连接词，表明确实是两个目标
+        if has_independent_goals and second_score and second_score >= 0.15:
+            logger.info(f"[IntentClassifier] 检测到多意图候选")
             # 映射第二个意图
             second_business_intent = intent_mapping.get(second_intent)
             candidate_intents = [business_intent]
-            if second_business_intent:
+            if second_business_intent and second_business_intent != business_intent:
                 candidate_intents.append(second_business_intent)
 
-            return IntentResult(
-                recognized=False,
-                intent=None,
-                decision=IntentDecision.MULTIPLE_INTENTS,
-                fallback_reason=IntentFallbackReason.MULTIPLE_INTENTS,
-                confidence=top_score,
-                second_confidence=second_score,
-                margin=margin,
-                candidate_intents=candidate_intents,
-                entities=entities,
-            )
+            # 只有在真的有两个不同意图时才返回多意图
+            if len(candidate_intents) >= 2:
+                return IntentResult(
+                    recognized=False,
+                    intent=None,
+                    decision=IntentDecision.CLARIFY,
+                    fallback_reason=IntentFallbackReason.MULTIPLE_INTENTS,
+                    confidence=top_score,
+                    second_confidence=second_score,
+                    margin=margin,
+                    candidate_intents=candidate_intents,
+                    entities=entities,
+                )
 
-        # 根据 v7 规范的阈值决定是否接受
-        # >=0.75 且 margin>=0.15 → ACCEPT
-        # 0.55~0.75 且 margin>=0.15 → CLARIFY
-        if top_score >= 0.75 and margin >= 0.15:
+        # 步骤3：即使没有明确连接词，如果分数很接近且都达到一定阈值，也可能是歧义
+        # 这种情况更保守：要求 top_score >= 0.55, second_score >= 0.40, margin < 0.15
+        elif (not has_independent_goals and second_score and
+              top_score >= 0.55 and second_score >= 0.40 and margin < 0.15):
+            second_business_intent = intent_mapping.get(second_intent)
+            candidate_intents = [business_intent]
+            if second_business_intent and second_business_intent != business_intent:
+                candidate_intents.append(second_business_intent)
+
+            if len(candidate_intents) >= 2:
+                return IntentResult(
+                    recognized=False,
+                    intent=None,
+                    decision=IntentDecision.CLARIFY,
+                    fallback_reason=IntentFallbackReason.MULTIPLE_INTENTS,
+                    confidence=top_score,
+                    second_confidence=second_score,
+                    margin=margin,
+                    candidate_intents=candidate_intents,
+                    entities=entities,
+                )
+
+        # 问题6修复：调整阈值逻辑
+        # >= 0.55 → ACCEPT（包括 0.73 这样的中等置信度）
+        # < 0.55 → CLARIFY (低置信度)
+        #
+        # 原因：实际测试发现 0.73 的分数对于"我想买鞋"、"谢谢"等明确意图已经足够高
+        # 不应该被拒绝
+        if top_score >= 0.55:
             decision = IntentDecision.ACCEPT
-        elif top_score >= 0.55:
-            decision = IntentDecision.CLARIFY
+            fallback_reason = None
         else:
             # <0.55 → CLARIFY with LOW_CONFIDENCE
             return IntentResult(
@@ -209,10 +250,36 @@ class IntentClassifier:
             recognized=(decision == IntentDecision.ACCEPT),
             intent=business_intent if decision == IntentDecision.ACCEPT else None,
             decision=decision,
-            fallback_reason=IntentFallbackReason.LOW_CONFIDENCE if decision == IntentDecision.CLARIFY else None,
+            fallback_reason=fallback_reason,
             confidence=top_score,
             second_confidence=second_score,
             margin=margin,
             candidate_intents=[business_intent] if decision == IntentDecision.CLARIFY else [],
             entities=entities,
         )
+
+
+def _detect_independent_goals(text: str, intent1: str, intent2: str | None) -> bool:
+    """
+    问题4修复：检测是否包含两个独立的用户目标
+
+    区分两种情况：
+    1. "这件鞋有优惠吗" - 一个目标（促销查询），只是提到了商品作为参数
+    2. "推荐鞋并查订单物流" - 两个独立目标（商品推荐 + 物流查询）
+
+    简化版实现：检查明确的连接词
+    """
+    if not intent2:
+        return False
+
+    # 明确表示两个独立动作的连接词
+    independent_connectors = [
+        "并且", "并", "同时", "还要", "另外", "再", "也要", "以及",
+        "，然后", "，再", "，还", "，同时", "，另外"
+    ]
+
+    for connector in independent_connectors:
+        if connector in text:
+            return True
+
+    return False

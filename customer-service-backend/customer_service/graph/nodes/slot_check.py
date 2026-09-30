@@ -41,35 +41,38 @@ def extract_slots_from_state(state: AgentState, intent: BusinessIntent) -> dict[
     """
     从 AgentState 中提取槽位值
 
-    问题二修复：使用 v7 规范字段
-    优先级：
-    1. conversation_focus（全局焦点）
+    问题5修复：使用正确的优先级顺序
+    优先级（由高到低）：
+    1. intent_result.entities（本轮明确提取的实体）
     2. active_task.slots（已填充的槽位）
-    3. 从用户消息中提取（简化版：关键词匹配）
+    3. conversation_focus（唯一且类型匹配的会话焦点）
+    4. 从用户消息中提取（关键词匹配 + 裸数字解析）
+
+    核心原则：本轮明确实体 > 任务已有槽位 > 会话焦点
     """
     slots = {}
     active_task = state.get("active_task")
     conversation_focus = state.get("conversation_focus")
     current_message = state.get("current_message", "")
+    intent_result = state.get("intent_result")
 
-    # P0-23 修复：从 active_task 获取已有槽位（统一使用 Pydantic 模型）
+    # 第1步：从 active_task 获取已有槽位（基线）
     if active_task:
         existing_slots = active_task.slots
         if existing_slots:
             slots.update(existing_slots)
 
-    # P0-23 修复：从 conversation_focus 提取（统一使用 Pydantic 模型）
+    # 第2步：从 conversation_focus 提取（只在不冲突时使用）
     if conversation_focus:
         entity_type = conversation_focus.entity_type
         entity_id = conversation_focus.entity_id
 
         if entity_type == "product" and entity_id:
-            slots["product_id"] = entity_id
+            slots.setdefault("product_id", entity_id)  # 使用 setdefault，已有的不覆盖
         elif entity_type == "order" and entity_id:
-            slots["order_id"] = entity_id
+            slots.setdefault("order_id", entity_id)
 
-    # 简化版：从消息中提取关键词
-    # 实际应该使用 NER 或 LLM 提取
+    # 第3步：从用户消息中提取（关键词 + 裸数字）
     message_lower = current_message.lower()
 
     # 提取商品类别（简单关键词匹配）
@@ -79,6 +82,32 @@ def extract_slots_from_state(state: AgentState, intent: BusinessIntent) -> dict[
         slots.setdefault("category", "裤子")
     elif "鞋" in message_lower:
         slots.setdefault("category", "鞋")
+
+    # 问题5修复：如果任务在等待 product_id，且消息是纯数字，解析为 product_id
+    if active_task and active_task.missing_slots and "product_id" in active_task.missing_slots:
+        # 检查是否是纯数字或包含数字
+        import re
+        numbers = re.findall(r'\d+', current_message.strip())
+        if numbers:
+            # 取第一个数字作为 product_id
+            slots["product_id"] = numbers[0]
+            logger.info(f"从补槽回答中提取 product_id={numbers[0]}")
+
+    # 问题5修复：如果任务在等待 order_id，且消息是纯数字，解析为 order_id
+    if active_task and active_task.missing_slots and "order_id" in active_task.missing_slots:
+        import re
+        numbers = re.findall(r'\d+', current_message.strip())
+        if numbers:
+            slots["order_id"] = numbers[0]
+            logger.info(f"从补槽回答中提取 order_id={numbers[0]}")
+
+    # 第4步（最高优先级）：从 intent_result.entities 提取本轮明确实体
+    # 这一步会覆盖前面的值
+    if intent_result and intent_result.entities:
+        for entity_type, entity_value in intent_result.entities.items():
+            if entity_value:  # 只有非空值才覆盖
+                slots[entity_type] = entity_value
+                logger.info(f"使用本轮明确实体覆盖: {entity_type}={entity_value}")
 
     return slots
 

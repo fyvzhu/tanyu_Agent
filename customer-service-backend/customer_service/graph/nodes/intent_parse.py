@@ -40,7 +40,7 @@ from customer_service.graph.state import (
     ActionMode,
 )
 from customer_service.graph.task_context_manager import TaskContextManager
-from customer_service.intents.models import BusinessIntent
+from customer_service.intents.models import BusinessIntent, IntentFallbackReason
 from customer_service.intents.policies import get_intent_policy
 from customer_service.tasking.models import PendingIntentSelection
 
@@ -66,10 +66,47 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
     logger.info(f"[{turn_id}] === 节点 1: Intent Parse 开始 ===")
     logger.debug(f"[{turn_id}] 用户输入: '{current_message[:100]}...'")
 
-    # ===== P1-21: 优先处理 pending_intent_selection =====
+    # ===== 问题4修复: 优先处理取消请求 =====
+    # 取消优先级最高，在所有其他处理之前
+    active_task = state.get("active_task")
     pending_selection = state.get("pending_intent_selection")
+
+    if (active_task or pending_selection) and _is_cancel_request(current_message):
+        logger.info(f"[{turn_id}] ❌ 检测到取消请求")
+
+        # 清空 pending_intent_selection（如果有）
+        if pending_selection:
+            state["pending_intent_selection"] = None
+            logger.info(f"[{turn_id}] 🧹 清空 pending_intent_selection")
+
+        # 取消当前任务（如果有）
+        if active_task:
+            state = TaskContextManager.cancel_current(
+                state,
+                turn_id=turn_id,
+            )
+
+        # 返回取消确认
+        intent_result = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.OUT_OF_SCOPE,
+            confidence=1.0,
+            entities={},
+        )
+        state["intent_result"] = intent_result
+        logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（取消）===")
+        return state
+
+    # ===== 问题4修复: 处理 pending_intent_selection =====
     if pending_selection:
         logger.info(f"[{turn_id}] 🔍 检测到 pending_intent_selection，尝试解析用户选择")
+
+        # 从Redis恢复时，pending_selection 可能是LangChain序列化的字典
+        if isinstance(pending_selection, dict):
+            pending_selection = PendingIntentSelection(**pending_selection.get("kwargs", {}))
+            state["pending_intent_selection"] = pending_selection
+
         selected_intent = _parse_intent_selection(
             current_message,
             pending_selection.candidate_intents
@@ -119,31 +156,7 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
             logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（澄清）===")
             return state
 
-    # ===== P1-22: 检测 Task Cancel 关键词 =====
-    # 优先级：在 Intent Classification 之前处理
-    active_task = state.get("active_task")
-    if active_task and _is_cancel_request(current_message):
-        logger.info(f"[{turn_id}] ❌ 检测到取消请求，取消当前任务")
-
-        # 调用 TaskContextManager.cancel_current()
-        state = TaskContextManager.cancel_current(
-            state,
-            turn_id=turn_id,
-            reason="user_cancel_keyword"
-        )
-
-        # 构造 IntentResult（取消不需要 intent）
-        intent_result = IntentResult(
-            recognized=True,
-            intent=None,
-            decision=IntentDecision.ACCEPT,
-            confidence=1.0,
-            entities={},
-        )
-        state["intent_result"] = intent_result
-
-        logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（取消任务）===")
-        return state
+    # ===== 取消检测已移到最前面，这里删除重复代码 =====
 
     # ===== 调用真实的 Intent Classifier =====
     from customer_service.intents.classifier import IntentClassifier
@@ -151,78 +164,84 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
     classifier = IntentClassifier()
     classification_result = classifier.classify(current_message)
 
-    # P1-21: 处理 MULTIPLE_INTENTS 决策
-    if classification_result.decision == IntentDecision.MULTIPLE_INTENTS:
-        logger.info(
-            f"[{turn_id}] 🔀 检测到多意图: {[i.value for i in classification_result.candidate_intents]}, "
-            f"margin={classification_result.margin:.2f}"
-        )
+    # 问题4修复: 处理分类器返回的 CLARIFY (包括 MULTIPLE_INTENTS 原因)
+    if classification_result.decision == IntentDecision.CLARIFY:
+        # 检查是否是多意图情况
+        if (classification_result.fallback_reason == IntentFallbackReason.MULTIPLE_INTENTS
+            and len(classification_result.candidate_intents) >= 2):
+            logger.info(
+                f"[{turn_id}] 🔀 检测到多意图: {[i.value for i in classification_result.candidate_intents]}, "
+                f"margin={classification_result.margin:.2f}"
+            )
 
-        # 创建 pending_intent_selection
-        state["pending_intent_selection"] = PendingIntentSelection(
-            candidate_intents=classification_result.candidate_intents,
-            original_turn_id=turn_id,
-        )
+            # 创建 pending_intent_selection
+            state["pending_intent_selection"] = PendingIntentSelection(
+                candidate_intents=classification_result.candidate_intents,
+                original_turn_id=turn_id,
+            )
 
-        # 构造 IntentResult（recognized=False）
-        intent_result = IntentResult(
-            recognized=False,
-            intent=None,
-            decision=IntentDecision.MULTIPLE_INTENTS,
-            confidence=classification_result.confidence,
-            second_confidence=classification_result.second_confidence,
-            margin=classification_result.margin,
-            candidate_intents=classification_result.candidate_intents,
-            entities=classification_result.entities or {},
-        )
-        state["intent_result"] = intent_result
+            # 保留分类器的原始 IntentResult
+            state["intent_result"] = classification_result
+            logger.info(f"[{turn_id}] ⏸️ 等待用户选择意图，不启动任务")
+            logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（多意图）===")
+            return state
+        else:
+            # 其他 CLARIFY 原因：LOW_CONFIDENCE 等
+            logger.info(
+                f"[{turn_id}] ❓ 需要澄清: reason={classification_result.fallback_reason}, "
+                f"confidence={classification_result.confidence:.2f}"
+            )
+            # 保留分类器的原始决策
+            state["intent_result"] = classification_result
+            logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（澄清）===")
+            return state
 
-        logger.info(f"[{turn_id}] ⏸️ 等待用户选择意图，不启动任务")
-        logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（多意图）===")
+    # 问题4修复: 保留 OUT_OF_SCOPE 和 CLASSIFIER_FAILURE 的原始决策
+    if classification_result.decision in (IntentDecision.OUT_OF_SCOPE, IntentDecision.CLASSIFIER_FAILURE):
+        logger.warning(
+            f"[{turn_id}] ⚠️ 分类器决策: {classification_result.decision.value}, "
+            f"reason={classification_result.fallback_reason}"
+        )
+        # 保留原始决策，不做任何改写
+        state["intent_result"] = classification_result
+        logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成 ===")
+        return state
+
+    # 问题4修复: 只有 ACCEPT 才进入任务管理
+    # 不再尝试调用 BusinessIntent(None) 导致 ValueError
+    if classification_result.decision != IntentDecision.ACCEPT or not classification_result.intent:
+        logger.warning(
+            f"[{turn_id}] ⚠️ 意图未被接受: decision={classification_result.decision.value}, "
+            f"intent={classification_result.intent}"
+        )
+        state["intent_result"] = classification_result
+        logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成 ===")
         return state
 
     # 映射到 BusinessIntent
-    intent_str = classification_result.intent
-
-    # P1-06 修复问题 1：未知 Intent 不能偷偷变成 CHITCHAT
-    # 按照 v7 #20 Intent Pipeline：recognized=false, decision=CLARIFY/OUT_OF_SCOPE/CLASSIFIER_FAILURE
-    try:
-        intent = BusinessIntent(intent_str)
-        recognized = True
-        decision = IntentDecision.ACCEPT
-    except ValueError:
-        # 未知意图：recognized=false, intent=null
-        logger.warning(f"[{turn_id}] ⚠️ 未知意图: {intent_str}，返回 OUT_OF_SCOPE")
-        intent = None
-        recognized = False
-        decision = IntentDecision.OUT_OF_SCOPE
-
-    if recognized:
-        logger.info(
-            f"[{turn_id}] 🎯 Intent 识别结果: {intent.value}, "
-            f"confidence={classification_result.confidence:.2f}"
-        )
-    else:
-        logger.warning(
-            f"[{turn_id}] ❌ Intent 未识别: {intent_str}, decision={decision.value}"
-        )
+    intent = classification_result.intent
+    recognized = True
+    logger.info(
+        f"[{turn_id}] 🎯 Intent 识别结果: {intent.value}, "
+        f"confidence={classification_result.confidence:.2f}"
+    )
 
     # P1-06 修复问题 2：ActionMode 必须基于 IntentPolicy，不能硬编码
     # urge_order_payment 的 requires_action_request=False，不应进入 ACTION_REQUEST
-    action_mode = None
-    if recognized and intent:
-        policy = get_intent_policy(intent)
-        if policy.requires_action_request:
-            action_mode = ActionMode.ACTION_REQUEST
-        else:
-            action_mode = ActionMode.INFORMATIONAL
+    policy = get_intent_policy(intent)
+    if policy.requires_action_request:
+        action_mode = ActionMode.ACTION_REQUEST
+    else:
+        action_mode = ActionMode.INFORMATIONAL
 
-    # 构造 IntentResult
+    # 使用分类器返回的完整 IntentResult，只更新 action_mode
     intent_result = IntentResult(
-        recognized=recognized,
+        recognized=True,
         intent=intent,
-        decision=decision,
+        decision=IntentDecision.ACCEPT,
         confidence=classification_result.confidence,
+        second_confidence=classification_result.second_confidence,
+        margin=classification_result.margin,
         entities=classification_result.entities or {},
         action_mode=action_mode,
     )
@@ -230,13 +249,6 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
     state["intent_result"] = intent_result
 
     # ===== Task 管理逻辑 =====
-    # 只有 recognized=True 且有有效 intent 时才管理 Task
-    if not recognized or not intent:
-        logger.info(
-            f"[{turn_id}] ⚠️ Intent 未识别，decision={decision.value}，不启动 Task"
-        )
-        return state
-
     # P1-48 修复：闲聊不启动新任务，保留原 active_task
     if intent == BusinessIntent.CHITCHAT:
         active_task = state.get("active_task")
