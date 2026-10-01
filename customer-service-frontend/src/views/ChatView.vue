@@ -73,8 +73,8 @@
 
               <!-- Bot 消息 -->
               <div v-for="botMsg in turn.botMessages" :key="botMsg.id" class="message bot-message">
-                <div class="message-avatar">
-                  <img :src="customerService.avatar" :alt="customerService.name" />
+                <div class="message-avatar message-avatar-emoji">
+                  {{ customerService.avatar }}
                 </div>
                 <div class="message-content">
                   <div class="bot-name">{{ customerService.name }}</div>
@@ -341,7 +341,7 @@ function initBg() {
 const customerService = {
   name: '探域智能体',
   title: 'AI助手',
-  avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=tanyu&backgroundColor=0d9488',
+  avatar: '🤖',  // 使用emoji，简单直接且兼容性好
   status: '在线'
 }
 
@@ -925,6 +925,15 @@ const transformImageUrl = transformImageUrlUtil
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* Emoji头像样式 */
+.message-avatar-emoji {
+  background: linear-gradient(135deg, #0d9488, #14b8a6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
 }
 
 .bot-message .message-content {
