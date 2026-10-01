@@ -29,6 +29,16 @@
         >
           <div class="session-title">{{ session.title || '新会话' }}</div>
           <div class="session-time">{{ formatTime(session.last_active_at) }}</div>
+
+          <!-- 只在活动会话显示删除按钮 -->
+          <button
+            v-if="session.session_id === chatStore.currentSessionId"
+            class="btn-delete-session"
+            @click.stop="confirmDeleteSession(session.session_id)"
+            title="删除会话"
+          >
+            🗑️
+          </button>
         </div>
         <div v-if="chatStore.sessions.length === 0" class="empty-sessions">
           暂无会话
@@ -89,9 +99,6 @@
 
                   <!-- 操作按钮 -->
                   <div class="message-actions">
-                    <button @click="playTts(botMsg)" class="btn-action">
-                      {{ ttsState[botMsg.id] === 'playing' ? '⏸' : '🔊' }}
-                    </button>
                     <button @click="copyBotText(botMsg)" class="btn-action">
                       {{ copyState[botMsg.id] ? '✓' : '📋' }}
                     </button>
@@ -208,10 +215,6 @@ const orders = ref([])
 const expandedOrders = ref([]) // 展开的订单ID列表
 const isLoadingSidebar = ref(false)
 const sidebarError = ref('')
-
-// TTS state
-const ttsState = ref({})
-let currentAudio = null
 
 // Copy state
 const copyState = ref({})
@@ -336,9 +339,9 @@ function initBg() {
 
 // 客服数字人配置
 const customerService = {
-  name: '小雨',
-  title: '金牌客服',
-  avatar: 'https://1234study.oss-cn-shenzhen.aliyuncs.com/%E5%AE%A2%E6%9C%8D.png',
+  name: '探域智能体',
+  title: 'AI助手',
+  avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=tanyu&backgroundColor=0d9488',
   status: '在线'
 }
 
@@ -616,33 +619,14 @@ onUnmounted(() => {
   if (bgCanvas.value?._cleanup) bgCanvas.value._cleanup()
 })
 
-async function playTts(botMsg) {
-  const msgId = botMsg.id
-  if (!botMsg.text || ttsState.value[msgId] === 'loading') return
-
-  if (currentAudio) { currentAudio.pause(); currentAudio = null }
-  for (const key of Object.keys(ttsState.value)) {
-    if (ttsState.value[key] === 'playing') ttsState.value[key] = 'idle'
-  }
-
-  ttsState.value[msgId] = 'loading'
-  try {
-    const response = await fetch('/api/chat/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: botMsg.text }),
-    })
-    if (!response.ok) throw new Error('TTS 请求失败')
-    const blob = await response.blob()
-    const url = URL.createObjectURL(blob)
-    currentAudio = new Audio(url)
-    ttsState.value[msgId] = 'playing'
-    currentAudio.onended = () => { ttsState.value[msgId] = 'idle'; URL.revokeObjectURL(url); currentAudio = null }
-    currentAudio.onerror = () => { ttsState.value[msgId] = 'idle'; URL.revokeObjectURL(url); currentAudio = null }
-    await currentAudio.play()
-  } catch (error) {
-    ttsState.value[msgId] = 'idle'
-    console.error('TTS error:', error)
+async function confirmDeleteSession(sessionId) {
+  if (confirm('确定要删除这个会话吗？')) {
+    try {
+      await chatStore.closeSession(sessionId)
+    } catch (error) {
+      console.error('删除会话失败:', error)
+      alert('删除会话失败')
+    }
   }
 }
 
@@ -787,6 +771,7 @@ const transformImageUrl = transformImageUrlUtil
   cursor: pointer;
   transition: all 0.3s;
   background: rgba(255, 255, 255, 0.05);
+  position: relative;
 }
 
 .session-item:hover {
@@ -805,11 +790,31 @@ const transformImageUrl = transformImageUrlUtil
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  padding-right: 32px;
 }
 
 .session-time {
   color: rgba(255, 255, 255, 0.5);
   font-size: 12px;
+}
+
+.btn-delete-session {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+  padding: 4px;
+}
+
+.btn-delete-session:hover {
+  opacity: 1;
+  color: #ef4444;
 }
 
 .empty-sessions {
