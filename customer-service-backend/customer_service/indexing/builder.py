@@ -55,7 +55,7 @@ class ProductIndexBuilder:
         
         try:
             # 1. 获取商品知识卡片
-            knowledge_card = await self.commerce.get_knowledge_card(product_id)
+            knowledge_card = await self.commerce.knowledge_card(product_id)
             if not knowledge_card:
                 logger.warning(f"[{product_id}] ⚠️ 商品不存在或无知识卡片")
                 return False

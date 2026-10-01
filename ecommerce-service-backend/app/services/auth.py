@@ -165,6 +165,94 @@ class AuthService:
         user_auth.locked_until = None
         await self.db.commit()
 
+    async def register(
+        self,
+        username: str,
+        nickname: str,
+        password: str,
+    ) -> tuple[TokenResponse, str]:
+        """
+        用户注册
+
+        Args:
+            username: 用户名
+            nickname: 昵称
+            password: 密码
+
+        Returns:
+            (TokenResponse, refresh_token): access_token 和刷新令牌
+
+        Raises:
+            ValueError: 注册失败
+        """
+        # 检查用户名是否已存在
+        existing_user_auth = await self.user_auth_repo.get_by_username(username)
+        if existing_user_auth:
+            raise ValueError("用户名已存在")
+
+        # 生成唯一 user_id
+        from uuid import uuid4
+        user_id = f"u{uuid4().hex[:8]}"
+
+        # 创建用户基础信息
+        user = await self.user_repo.create(
+            user_id=user_id,
+            username=username,
+            nickname=nickname,
+            level="普通用户",
+        )
+
+        # 创建用户认证信息（密码哈希）
+        from app.core import hash_password
+        password_hash = hash_password(password)
+        await self.user_auth_repo.create(
+            user_id=user_id,
+            username=username,
+            password_hash=password_hash,
+            status="active",
+        )
+
+        await self.db.commit()
+
+        logger.info(f"用户注册成功：{username} (user_id={user_id})")
+
+        # 注册成功后自动登录，生成 token
+        access_token = create_access_token(
+            data={"user_id": user_id, "username": username}
+        )
+
+        # 生成刷新令牌
+        refresh_token = create_refresh_token()
+        token_hash = hash_refresh_token(refresh_token)
+        expires_at = datetime.now() + timedelta(days=settings.jwt_refresh_token_expire_days)
+
+        # 存储刷新令牌会话
+        refresh_repo = RefreshTokenSessionRepository(self.db)
+        await refresh_repo.create(
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at
+        )
+
+        await self.db.commit()
+
+        # 构造返回数据
+        user_info = UserBasicInfo(
+            user_id=user_id,
+            username=username,
+            nickname=nickname,
+            level="普通用户",
+        )
+
+        token_response = TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=settings.jwt_access_token_expire_minutes * 60,
+            user=user_info,
+        )
+
+        return token_response, refresh_token
+
     async def refresh_access_token(self, refresh_token: str) -> tuple[TokenResponse, str]:
         """
         使用刷新令牌获取新的访问令牌

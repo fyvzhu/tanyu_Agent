@@ -248,6 +248,7 @@ class ProductQueryFlow:
         logger.info(f"[{session_id}] ✅ product_search_tool returned {len(candidates)} candidates, mode={retrieval_mode}")
 
         # P1-32: 转换为 ProductCard 格式
+        # P7 修复: 正确处理 Commerce-only 降级路径（无 selected_sku）
         product_cards = []
         for candidate in candidates:
             product_id = candidate.get("product_id")
@@ -255,20 +256,37 @@ class ProductQueryFlow:
                 continue
 
             # 从 candidate 提取 selected_sku
-            selected_sku = candidate.get("selected_sku", {})
+            selected_sku = candidate.get("selected_sku")
+
+            # P7 修复: Commerce-only 路径使用 min_price/max_price 而非 selected_sku.price
+            if selected_sku:
+                # RAG 路径: 有具体 SKU
+                min_price = selected_sku.get("price")
+                max_price = selected_sku.get("price")
+                matched_skus = [selected_sku]
+                selected_sku_id = selected_sku.get("sku_id")
+                selected_sku_price = selected_sku.get("price")
+            else:
+                # Commerce-only 降级路径: 无具体 SKU，使用价格范围
+                min_price = candidate.get("min_price")
+                max_price = candidate.get("max_price")
+                matched_skus = []
+                selected_sku_id = None
+                selected_sku_price = None
 
             # 构造 ProductCard
+            # 问题修复2: 确保字段与 ProductCard 模型完全匹配
             product_card = {
                 "type": "product_card",
                 "product_id": product_id,
                 "title": candidate.get("product_display_name"),
                 "brand": candidate.get("brand"),
-                "main_image_url": candidate.get("main_image_url"),  # 从商品详情获取
-                "min_price": selected_sku.get("price"),
-                "max_price": selected_sku.get("price"),
-                "matched_skus": [selected_sku] if selected_sku else [],
-                "selected_sku_id": selected_sku.get("sku_id"),
-                "selected_sku_price": selected_sku.get("price"),
+                "main_image_url": candidate.get("main_image_url"),  # P7: 两条路径都有此字段
+                "min_price": float(min_price) if min_price is not None else None,
+                "max_price": float(max_price) if max_price is not None else None,
+                "selected_sku_id": selected_sku_id,
+                "selected_sku_price": float(selected_sku_price) if selected_sku_price is not None else None,
+                "stock_status": matched_skus[0].get("stock_status") if matched_skus else None,
             }
             product_cards.append(product_card)
 
@@ -338,15 +356,16 @@ class ProductQueryFlow:
             selected_sku = skus[0]
 
         # 构造 ProductCard（使用商品的 main_image_url）
+        # 问题修复2: 确保字段与 ProductCard 模型完全匹配
         return {
             "type": "product_card",
             "product_id": product.get("product_id"),
             "title": product.get("product_display_name") or product.get("name"),
             "brand": product.get("brand"),
             "main_image_url": product.get("main_image_url"),  # 从商品详情获取
-            "min_price": min_price,
-            "max_price": max_price,
-            "matched_skus": skus,
+            "min_price": float(min_price) if min_price is not None else None,
+            "max_price": float(max_price) if max_price is not None else None,
             "selected_sku_id": selected_sku.get("sku_id") if selected_sku else None,
-            "selected_sku_price": selected_sku.get("price") if selected_sku else None,
+            "selected_sku_price": float(selected_sku.get("price")) if selected_sku and selected_sku.get("price") else None,
+            "stock_status": selected_sku.get("stock_status") if selected_sku else None,
         }

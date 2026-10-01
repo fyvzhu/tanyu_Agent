@@ -42,3 +42,11 @@ class UserBasicInfo(BaseModel):
 class RefreshTokenRequest(BaseModel):
     """刷新 Token 请求"""
     refresh_token: str | None = None  # 可从 cookie 读取
+
+
+class UserRegisterRequest(BaseModel):
+    """用户注册请求"""
+    username: str = Field(..., min_length=4, max_length=20, description="用户名（4-20个字符，字母数字下划线）")
+    nickname: str = Field(..., min_length=2, max_length=50, description="昵称")
+    password: str = Field(..., min_length=8, max_length=16, description="密码（8-16个字符）")
+    confirm_password: str = Field(..., min_length=8, max_length=16, description="确认密码")

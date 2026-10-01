@@ -145,6 +145,60 @@ async def delete_session(
     return ApiResponse(data={"session_id": session_id, "status": "closed"})
 
 
+@router.get("/api/v1/chat/sessions", response_model=ApiResponse[dict])
+async def list_sessions(
+    principal_and_token: AuthPrincipalDep,
+    repo: ChatRepositoryDep,
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+) -> ApiResponse[dict]:
+    """
+    获取用户的会话列表（强制用户隔离）
+
+    - 按最后活跃时间倒序排列
+    - 支持分页
+    - 自动生成会话标题（基于首条用户消息）
+    """
+    principal, access_token = principal_and_token
+    offset = (page - 1) * page_size
+
+    logger.info(
+        f"📋 [API] 获取会话列表: user_id={principal.user_id}, "
+        f"page={page}, page_size={page_size}"
+    )
+
+    sessions, total = await repo.list_sessions(principal, limit=page_size, offset=offset)
+
+    # 构造响应数据
+    items = []
+    for session in sessions:
+        # 生成会话标题
+        first_msg = await repo.get_first_user_message(session.id)
+        if first_msg:
+            title = first_msg[:20] + ("..." if len(first_msg) > 20 else "")
+        else:
+            title = f"新会话 - {session.created_at.strftime('%m/%d %H:%M')}"
+
+        items.append({
+            "session_id": session.id,
+            "title": title,
+            "status": session.status,
+            "last_active_at": session.last_active_at.isoformat() if session.last_active_at else None,
+            "created_at": session.created_at.isoformat(),
+        })
+
+    logger.info(f"✅ [API] 会话列表获取成功: 共 {total} 个会话，返回 {len(items)} 个")
+
+    return ApiResponse(
+        data={
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+    )
+
+
 # ==================== Message 管理 ====================
 
 @router.post(
@@ -314,27 +368,6 @@ async def send_message(
                     intent_name = str(intent_result.get("intent", "unknown"))
                     intent_confidence = intent_result.get("confidence", 0.0)
 
-            # 5. 添加 Assistant 消息
-            assistant_message = await repo.add_message(
-                session_id=session_id,
-                role=MessageRole.ASSISTANT,
-                content=assistant_response,
-                principal=principal,
-                metadata={
-                    "turn_id": turn_id,
-                    "intent": intent_name,
-                    "intent_confidence": intent_confidence,
-                    "guard_retry_count": final_state.get("guard_retry_count", 0),
-                    "fallback_used": final_state.get("fallback_used", False),
-                }
-            )
-
-            elapsed = time.time() - start_time
-            logger.info(
-                f"[{session_id}] ✅ [API] 消息处理成功: turn_id={turn_id}, "
-                f"intent={intent_name}, 耗时={elapsed:.2f}s"
-            )
-
             # P0-23 修复：提取 task 状态（统一使用 Pydantic 模型）
             task_status = "completed"
             if active_task:
@@ -366,12 +399,97 @@ async def send_message(
                             "evidence": tool_data.get("evidence", []),
                         }
 
+            # 问题修复2：先构造并验证响应对象，再保存消息
+            # 这样可以避免"消息已入库但 HTTP 返回 500"的半成品
+            logger.debug(f"[{session_id}] 原始对象数量: {len(objects)}, 类型: {[type(obj).__name__ for obj in objects]}")
+            if objects:
+                logger.debug(f"[{session_id}] 第一个对象内容: {objects[0]}")
+
+            try:
+                from customer_service.schemas.chat import ProductCard, PromotionCard
+
+                validated_objects = []
+                for i, obj in enumerate(objects):
+                    if isinstance(obj, dict):
+                        # 根据 type 字段选择正确的模型
+                        obj_type = obj.get("type")
+                        logger.debug(f"[{session_id}] 验证对象 {i+1}: type={obj_type}, keys={list(obj.keys())}")
+
+                        if obj_type == "product_card":
+                            validated_obj = ProductCard(**obj)
+                            logger.debug(f"[{session_id}] ✅ ProductCard 验证成功: {validated_obj.product_id}")
+                        elif obj_type == "promotion":
+                            validated_obj = PromotionCard(**obj)
+                            logger.debug(f"[{session_id}] ✅ PromotionCard 验证成功: {validated_obj.promotion_id}")
+                        else:
+                            logger.warning(f"[{session_id}] ⚠️  未知对象类型: {obj_type}, 对象: {obj}")
+                            continue
+                        validated_objects.append(validated_obj)
+                    else:
+                        # 已经是 Pydantic 对象
+                        logger.debug(f"[{session_id}] 对象 {i+1} 已是 Pydantic 对象: {type(obj).__name__}")
+                        validated_objects.append(obj)
+
+                logger.info(f"[{session_id}] ✅ 对象验证完成: {len(validated_objects)}/{len(objects)} 个对象通过验证")
+                objects = validated_objects
+            except Exception as e:
+                logger.error(
+                    f"[{session_id}] ❌ 对象结构验证失败: turn_id={turn_id}, error={e}, "
+                    f"objects_count={len(objects)}", exc_info=True
+                )
+                # 对象验证失败，不保存消息，返回错误
+                dialogue_reason = "object_validation_error"
+                objects = []  # 清空对象
+
+            # 5. 添加 Assistant 消息（在验证成功后）
+            # 将 objects 序列化为 JSON 保存
+            objects_json = None
+            if objects:
+                try:
+                    import json
+                    # 将 Pydantic 对象转换为字典
+                    objects_dict = [obj.model_dump() if hasattr(obj, 'model_dump') else obj for obj in objects]
+                    objects_json = json.dumps(objects_dict, ensure_ascii=False)
+                except Exception as e:
+                    logger.error(f"[{session_id}] ⚠️ 对象序列化失败: {e}")
+
+            assistant_message = await repo.add_message(
+                session_id=session_id,
+                role=MessageRole.ASSISTANT,
+                content=assistant_response,
+                principal=principal,
+                metadata={
+                    "turn_id": turn_id,
+                    "intent": intent_name,
+                    "intent_confidence": intent_confidence,
+                    "guard_retry_count": final_state.get("guard_retry_count", 0),
+                    "fallback_used": final_state.get("fallback_used", False),
+                },
+                objects_json=objects_json,  # 保存验证后的对象
+            )
+
+            elapsed = time.time() - start_time
+            logger.info(
+                f"[{session_id}] ✅ [API] 消息处理成功: turn_id={turn_id}, "
+                f"intent={intent_name}, objects_count={len(objects)}, 耗时={elapsed:.2f}s"
+            )
+
+            # 问题修复2: 显式转换对象为字典，避免 Pydantic 序列化问题
+            objects_for_response = []
+            for obj in objects:
+                if hasattr(obj, 'model_dump'):
+                    objects_for_response.append(obj.model_dump())
+                elif isinstance(obj, dict):
+                    objects_for_response.append(obj)
+                else:
+                    logger.warning(f"[{session_id}] ⚠️  无法序列化对象: {type(obj)}")
+
             return ApiResponse(
                 data=ChatTurnResponse(
                     turn_id=turn_id,
                     message_id=assistant_message.message_id if assistant_message else str(uuid.uuid4()),
                     text=assistant_response,
-                    objects=objects,  # P1-32: 传递实际的 objects
+                    objects=objects_for_response,  # 使用转换后的字典列表
                     task=ChatTaskSummary(intent=intent_name, status=task_status),
                     dialogue_reason=dialogue_reason,  # P1-33: 传递 dialogue_reason
                     retrieved_context=retrieved_context,

@@ -10,7 +10,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from customer_service.graph.state import AgentState
-from customer_service.graph.routing import route_after_slot_check, route_after_guard
+from customer_service.graph.routing import route_after_intent, route_after_slot_check, route_after_guard
 from customer_service.graph.nodes.intent_parse import intent_parse_node
 from customer_service.graph.nodes.slot_check import slot_check_node
 from customer_service.graph.nodes.tool_dispatch import tool_dispatch_node
@@ -22,10 +22,12 @@ def build_agent_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     """
     构建 LangGraph 主状态机（唯一执行图）
 
-    固定五节点流程：
-    START → intent_parse → slot_check → [need_clarify/execute_tool/direct_response]
-                                           ↓
-                                      tool_dispatch → response_gen → hallucination_guard → [pass/retry/fallback] → END
+    问题修复2-3: 优化图结构
+    START → intent_parse → [根据 turn_action 路由]
+      - CANCEL/CHITCHAT/CLARIFY → response_gen
+      - ACCEPT → slot_check → [根据 resumed_this_turn/missing_slots 路由]
+        - respond: response_gen
+        - execute: tool_dispatch → response_gen → hallucination_guard → END
 
     Args:
         checkpointer: LangGraph Checkpointer（支持 Redis 持久化）
@@ -44,17 +46,23 @@ def build_agent_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     # 设置入口
     builder.set_entry_point("intent_parse")
 
-    # intent_parse → slot_check
-    builder.add_edge("intent_parse", "slot_check")
+    # 问题修复2-3: intent_parse → 条件路由（根据 turn_action）
+    builder.add_conditional_edges(
+        "intent_parse",
+        route_after_intent,
+        {
+            "respond": "response_gen",      # CANCEL/CHITCHAT/CLARIFY 等直接生成回复
+            "check_slots": "slot_check",    # ACCEPT 进入槽位检查
+        },
+    )
 
-    # slot_check → 条件路由
+    # slot_check → 条件路由（根据 resumed_this_turn 和 missing_slots）
     builder.add_conditional_edges(
         "slot_check",
         route_after_slot_check,
         {
-            "need_clarify": "response_gen",      # 需要澄清 → 直接生成澄清问题
-            "execute_tool": "tool_dispatch",      # 执行工具
-            "direct_response": "response_gen",    # 直接回复（闲聊/other）
+            "respond": "response_gen",      # 需要澄清或恢复任务本轮
+            "execute": "tool_dispatch",     # 执行工具
         },
     )
 

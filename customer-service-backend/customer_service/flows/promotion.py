@@ -129,11 +129,31 @@ class PromotionQueryFlow:
             # P1-07 修复：返回 FlowResult
             promotions = tool_result.data.get("items", []) if tool_result.ok else []
 
+            # 问题修复2: 将 Commerce 返回的促销对象转换为 PromotionCard 格式
+            # Commerce API 返回的字段已经与 PromotionCard 对齐（title, start_at, end_at 等）
+            promotion_objects = []
+            for promo in promotions:
+                promotion_card = {
+                    "type": "promotion",
+                    "promotion_id": promo.get("promotion_id"),
+                    "title": promo.get("title"),
+                    "promotion_type": promo.get("promotion_type"),
+                    "description": promo.get("description"),
+                    "start_at": promo.get("start_at"),
+                    "end_at": promo.get("end_at"),
+                    "applicable": promo.get("applicable", True),
+                    "discount_rate": float(promo["discount_rate"]) if promo.get("discount_rate") is not None else None,
+                    "discount_amount": float(promo["discount_amount"]) if promo.get("discount_amount") is not None else None,
+                    "threshold_amount": float(promo["threshold_amount"]) if promo.get("threshold_amount") is not None else None,
+                    "promo_price": float(promo["promo_price"]) if promo.get("promo_price") is not None else None,
+                }
+                promotion_objects.append(promotion_card)
+
             return FlowResult(
                 ready_for_response=True,
                 tool_result=tool_result,
                 dialogue_reason=None if tool_result.ok else "error",
-                objects=promotions
+                objects=promotion_objects
             )
 
         except Exception as e:

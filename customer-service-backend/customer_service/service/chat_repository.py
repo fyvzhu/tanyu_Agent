@@ -92,17 +92,48 @@ class ChatRepository:
         principal: AuthPrincipal,
         limit: int = 20,
         offset: int = 0
-    ) -> list[ChatSession]:
-        """列出用户的所有 Session"""
+    ) -> tuple[list[ChatSession], int]:
+        """
+        列出用户的所有 Session（按最后活跃时间排序）
+
+        Returns:
+            (sessions, total): 会话列表和总数
+        """
+        # 查询总数
+        count_stmt = (
+            select(func.count(ChatSession.id))
+            .where(ChatSession.user_id == principal.user_id)
+        )
+        total_result = await self.session.execute(count_stmt)
+        total = total_result.scalar_one()
+
+        # 查询会话列表（按 last_active_at 降序）
         stmt = (
             select(ChatSession)
             .where(ChatSession.user_id == principal.user_id)
-            .order_by(ChatSession.created_at.desc())
+            .order_by(ChatSession.last_active_at.desc())
             .limit(limit)
             .offset(offset)
         )
         result = await self.session.execute(stmt)
-        return list(result.scalars().all())
+        sessions = list(result.scalars().all())
+
+        return sessions, total
+
+    async def get_first_user_message(self, session_id: str) -> Optional[str]:
+        """获取会话的第一条用户消息内容（用于生成标题）"""
+        stmt = (
+            select(ChatMessage.text)
+            .where(
+                ChatMessage.session_id == session_id,
+                ChatMessage.role == MessageRole.USER
+            )
+            .order_by(ChatMessage.created_at.asc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        message_text = result.scalar_one_or_none()
+        return message_text
     
     async def close_session(
         self,
@@ -138,11 +169,15 @@ class ChatRepository:
         role: MessageRole,
         content: str,
         principal: AuthPrincipal,
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
+        objects_json: Optional[str] = None  # 问题修复2：支持直接传递已序列化的对象
     ) -> Optional[ChatMessage]:
         """
         添加消息（强制 Ownership Check）
-        
+
+        Args:
+            objects_json: 已序列化的对象 JSON 字符串（优先使用）
+
         Returns:
             ChatMessage 或 None（Session 不存在或无权限）
         """
@@ -157,7 +192,11 @@ class ChatRepository:
 
         metadata = metadata or {}
         turn_id = str(metadata.get("turn_id") or uuid.uuid4())
-        
+
+        # 问题修复2：优先使用传入的 objects_json，否则从 metadata 获取
+        if objects_json is None:
+            objects_json = json.dumps(metadata.get("objects", []), ensure_ascii=False)
+
         message = ChatMessage(
             message_id=str(uuid.uuid4()),
             session_id=session_id,
@@ -166,7 +205,7 @@ class ChatRepository:
             role=role,
             content=content,
             metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else None,
-            objects_json=json.dumps(metadata.get("objects", []), ensure_ascii=False),
+            objects_json=objects_json,
             created_at=datetime.utcnow()
         )
         
