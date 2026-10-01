@@ -207,6 +207,32 @@ class OrderService:
         """构建订单响应对象"""
         items = await self.order_item_repo.get_by_order_id(order.order_id)
 
+        # 为每个订单项填充商品详细信息
+        item_responses = []
+        for item in items:
+            # 获取商品信息
+            product = await self.product_repo.get_by_product_id(item.product_id)
+            # 获取SKU信息
+            sku = await self.sku_repo.get_by_sku_id(item.sku_id)
+
+            # 构造图片URL（基于 product_id）
+            image_url = f"/images/{item.product_id}.jpg"
+
+            item_responses.append(
+                OrderItemResponse(
+                    product_id=item.product_id,
+                    sku_id=item.sku_id,
+                    quantity=item.quantity,
+                    price=item.price,
+                    # 填充商品详细信息
+                    product_name=product.product_display_name if product else None,
+                    brand=product.brand if product else None,
+                    color=sku.color if sku else None,
+                    size=sku.size_code if sku else None,
+                    main_image_url=image_url,
+                )
+            )
+
         return OrderResponse(
             order_id=order.order_id,
             user_id=order.user_id,
@@ -217,15 +243,7 @@ class OrderService:
             receiver_name=order.receiver_name,
             receiver_phone=order.receiver_phone,
             receiver_address=order.receiver_address,
-            items=[
-                OrderItemResponse(
-                    product_id=item.product_id,
-                    sku_id=item.sku_id,
-                    quantity=item.quantity,
-                    price=item.price,
-                )
-                for item in items
-            ],
+            items=item_responses,
         )
 
     @staticmethod

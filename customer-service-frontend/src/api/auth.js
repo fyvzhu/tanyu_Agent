@@ -55,3 +55,24 @@ export function getCurrentUser() {
     method: 'get',
   })
 }
+
+/**
+ * 获取用户个人信息
+ */
+export function getUserProfile() {
+  return request({
+    url: '/commerce/api/v1/users/profile',
+    method: 'get',
+  })
+}
+
+/**
+ * 更新用户个人信息
+ */
+export function updateUserProfile(data) {
+  return request({
+    url: '/commerce/api/v1/users/profile',
+    method: 'put',
+    data,
+  })
+}

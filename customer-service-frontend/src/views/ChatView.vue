@@ -14,6 +14,9 @@
           <div class="user-name">{{ userStore.nickname || userStore.username }}</div>
           <div class="user-status">在线</div>
         </div>
+        <button class="btn-profile" @click="router.push('/profile')" title="个人信息">
+          ⚙️
+        </button>
       </div>
 
       <div class="session-list">
@@ -117,39 +120,60 @@
       </div>
     </div>
 
-    <!-- 右侧订单/商品列表 -->
+    <!-- 右侧订单列表 -->
     <div class="sidebar-right">
       <div class="tabs">
-        <button @click="activeTab = 'orders'" :class="{ active: activeTab === 'orders' }">
-          我的订单
-        </button>
-        <button @click="activeTab = 'products'" :class="{ active: activeTab === 'products' }">
-          商品
-        </button>
+        <button class="active">我的订单</button>
       </div>
 
       <div class="tab-content">
-        <!-- 订单列表 -->
-        <div v-if="activeTab === 'orders'" class="orders-list">
-          <div v-for="order in orders" :key="order.order_id" class="order-item" @click="sendOrder(order)">
-            <div class="order-id">订单 #{{ order.order_id }}</div>
-            <div class="order-status">{{ order.status }}</div>
-            <div class="order-total">¥{{ order.amount }}</div>
-          </div>
-          <div v-if="orders.length === 0 && !isLoadingSidebar" class="empty">暂无订单</div>
-          <div v-if="isLoadingSidebar" class="loading">加载中...</div>
-        </div>
+        <!-- 订单列表（带展开/收起功能） -->
+        <div class="orders-list">
+          <div v-for="order in orders" :key="order.order_id" class="order-container">
+            <!-- 订单头部（可点击展开/收起） -->
+            <div class="order-header" @click="toggleOrderExpand(order.order_id)">
+              <span class="expand-icon" :class="{ expanded: expandedOrders.includes(order.order_id) }">▶</span>
+              <div class="order-summary">
+                <div class="order-id">订单 #{{ order.order_id }}</div>
+                <div class="order-meta">
+                  <span class="order-status">{{ order.status }}</span>
+                  <span class="order-total">¥{{ order.amount }}</span>
+                </div>
+              </div>
+            </div>
 
-        <!-- 商品列表 -->
-        <div v-if="activeTab === 'products'" class="products-list">
-          <div v-for="product in products" :key="product.product_id" class="product-item" @click="sendProduct(product)">
-            <img :src="transformImageUrl(product.main_image_url)" :alt="product.product_display_name" />
-            <div class="product-details">
-              <div class="product-name">{{ product.product_display_name }}</div>
-              <div class="product-price">¥{{ product.min_price }}</div>
+            <!-- 订单商品明细（展开时显示） -->
+            <div v-if="expandedOrders.includes(order.order_id)" class="order-items">
+              <div v-for="item in order.items" :key="item.sku_id" class="order-product-item">
+                <!-- 商品图片 -->
+                <div class="product-thumb">
+                  <img
+                    v-if="item.main_image_url"
+                    :src="transformImageUrl(item.main_image_url)"
+                    :alt="item.product_name"
+                    @error="handleImageError"
+                  />
+                </div>
+
+                <div class="product-info">
+                  <!-- 商品名称 - 2行省略 + Tooltip -->
+                  <el-tooltip :content="`${item.brand || ''} ${item.product_name || ''}`.trim()" placement="top">
+                    <div class="product-name">{{ item.brand }} {{ item.product_name }}</div>
+                  </el-tooltip>
+                  <div class="product-specs">
+                    <span v-if="item.color">{{ item.color }}</span>
+                    <span v-if="item.size">{{ item.size }}</span>
+                  </div>
+                  <div class="product-price-qty">
+                    <span>¥{{ item.price }}</span>
+                    <span>x{{ item.quantity }}</span>
+                  </div>
+                </div>
+              </div>
+              <div v-if="!order.items || order.items.length === 0" class="empty-items">该订单暂无商品信息</div>
             </div>
           </div>
-          <div v-if="products.length === 0 && !isLoadingSidebar" class="empty">暂无商品</div>
+          <div v-if="orders.length === 0 && !isLoadingSidebar" class="empty">暂无订单</div>
           <div v-if="isLoadingSidebar" class="loading">加载中...</div>
         </div>
 
@@ -167,7 +191,7 @@ import { useRouter } from 'vue-router'
 import { sendMessage } from '@/api/chat'
 import { logout } from '@/api/auth'
 import { clearAuth } from '@/utils/auth'
-import { getOrders, getProducts, transformImageUrl as transformImageUrlUtil } from '@/api/commerce'
+import { getOrders, transformImageUrl as transformImageUrlUtil } from '@/api/commerce'
 
 const userStore = useUserStore()
 const chatStore = useChatStore()
@@ -180,10 +204,9 @@ const messages = ref([])
 const messagesContainer = ref(null)
 
 const orders = ref([])
-const products = ref([])
+const expandedOrders = ref([]) // 展开的订单ID列表
 const isLoadingSidebar = ref(false)
 const sidebarError = ref('')
-const activeTab = ref('orders')
 
 // TTS state
 const ttsState = ref({})
@@ -447,7 +470,6 @@ watch(
 
 async function fetchSidebarData() {
   orders.value = []
-  products.value = []
   sidebarError.value = ''
 
   if (!userStore.username) {
@@ -456,18 +478,31 @@ async function fetchSidebarData() {
 
   isLoadingSidebar.value = true
   try {
-    const [ordersRes, productsRes] = await Promise.all([
-      getOrders({ page: 1, page_size: 20 }),
-      getProducts({ page: 1, page_size: 20 }),
-    ])
-
+    const ordersRes = await getOrders({ page: 1, page_size: 20 })
     orders.value = ordersRes.data?.items || []
-    products.value = productsRes.data?.items || []
   } catch (error) {
-    sidebarError.value = error instanceof Error ? error.message : '加载右侧列表失败。'
+    sidebarError.value = error instanceof Error ? error.message : '加载订单列表失败。'
   } finally {
     isLoadingSidebar.value = false
   }
+}
+
+// 切换订单展开/收起
+function toggleOrderExpand(orderId) {
+  const index = expandedOrders.value.indexOf(orderId)
+  if (index > -1) {
+    // 收起
+    expandedOrders.value.splice(index, 1)
+  } else {
+    // 展开
+    expandedOrders.value.push(orderId)
+  }
+}
+
+// 图片加载错误处理
+function handleImageError(event) {
+  // 图片加载失败时隐藏图片
+  event.target.style.display = 'none'
 }
 
 async function fetchChatHistory() {
@@ -558,7 +593,7 @@ async function sendProduct(product) {
     object: {
       type: 'product',
       id: product.product_id,
-      title: product.product_display_name,
+      title: `${product.brand || ''} ${product.product_display_name}`.trim(),
       attributes: {
         brand: product.brand,
         category: product.category,
@@ -747,6 +782,26 @@ const transformImageUrl = transformImageUrlUtil
 .user-status {
   color: rgba(255, 255, 255, 0.6);
   font-size: 12px;
+}
+
+.btn-profile {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(13, 148, 136, 0.2);
+  border: 1px solid rgba(13, 148, 136, 0.3);
+  color: white;
+  cursor: pointer;
+  transition: all 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.btn-profile:hover {
+  background: rgba(13, 148, 136, 0.4);
+  transform: scale(1.1);
 }
 
 .session-list {
@@ -1094,32 +1149,66 @@ const transformImageUrl = transformImageUrlUtil
   padding: 16px;
 }
 
-.order-item, .product-item {
+/* 订单容器（带展开/收起） */
+.order-container {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(13, 148, 136, 0.2);
   border-radius: 8px;
-  padding: 12px;
   margin-bottom: 12px;
-  cursor: pointer;
+  overflow: hidden;
   transition: all 0.3s;
 }
 
-.order-item:hover, .product-item:hover {
+.order-container:hover {
   background: rgba(13, 148, 136, 0.1);
-  transform: translateX(-4px);
+  border-color: rgba(13, 148, 136, 0.4);
+}
+
+.order-header {
+  display: flex;
+  align-items: center;
+  padding: 12px;
+  cursor: pointer;
+  gap: 12px;
+  user-select: none;
+}
+
+.expand-icon {
+  color: #14B8A6;
+  font-size: 12px;
+  transition: transform 0.3s;
+  flex-shrink: 0;
+}
+
+.expand-icon.expanded {
+  transform: rotate(90deg);
+}
+
+.order-summary {
+  flex: 1;
+  min-width: 0;
 }
 
 .order-id {
   color: white;
   font-weight: 500;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
   font-size: 14px;
+}
+
+.order-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
 
 .order-status {
   color: rgba(255, 255, 255, 0.6);
   font-size: 12px;
-  margin-bottom: 4px;
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
 }
 
 .order-total {
@@ -1128,9 +1217,112 @@ const transformImageUrl = transformImageUrlUtil
   font-size: 16px;
 }
 
-.product-item {
+/* 订单商品明细 */
+.order-items {
+  border-top: 1px solid rgba(13, 148, 136, 0.2);
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.order-product-item {
   display: flex;
   gap: 12px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.order-product-item:last-child {
+  margin-bottom: 0;
+}
+
+.product-thumb {
+  width: 60px;
+  height: 60px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.product-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.product-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.product-name {
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  /* 2行省略显示 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+  word-break: break-word;
+  cursor: help;
+}
+
+.product-specs {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+  display: flex;
+  gap: 8px;
+}
+
+.product-specs span {
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+.product-price-qty {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #14B8A6;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.empty-items {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 12px;
+  padding: 16px;
+}
+
+/* 保留旧的 product-item 样式（用于其他地方） */
+.product-item {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(13, 148, 136, 0.2);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  transition: all 0.3s;
+  display: flex;
+  gap: 12px;
+}
+
+.product-item:hover {
+  background: rgba(13, 148, 136, 0.1);
+  transform: translateX(-4px);
 }
 
 .product-item img {

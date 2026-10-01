@@ -40,6 +40,12 @@ class OrderItemResponse(BaseModel):
     sku_id: str
     quantity: int
     price: Decimal
+    # 扩展字段：商品详细信息
+    product_name: str | None = None
+    brand: str | None = None
+    color: str | None = None
+    size: str | None = None
+    main_image_url: str | None = None
 
     class Config:
         from_attributes = True

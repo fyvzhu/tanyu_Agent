@@ -48,7 +48,7 @@ export function getOrderDetail(orderId) {
 export function transformImageUrl(url) {
   if (!url) return ''
   if (url.startsWith('http')) return url
-  if (url.startsWith('/static/')) {
+  if (url.startsWith('/static/') || url.startsWith('/images/')) {
     return `/commerce${url}`
   }
   return url

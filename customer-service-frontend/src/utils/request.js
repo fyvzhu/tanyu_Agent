@@ -40,10 +40,10 @@ request.interceptors.response.use(
           withCredentials: true, // 携带 HttpOnly Cookie
         })
 
-        if (data.code === 0) {
+        if (data.success && data.data) {
           // 更新 access token
           setAccessToken(data.data.access_token)
-          
+
           // 重试原请求
           originalRequest.headers.Authorization = `Bearer ${data.data.access_token}`
           return axios(originalRequest)

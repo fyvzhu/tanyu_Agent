@@ -61,6 +61,8 @@ DATA_DIR = PROJECT_ROOT / "data"
 # 挂载静态文件目录（使用绝对路径）
 app.mount("/static/main-images", StaticFiles(directory=str(DATA_DIR / "main_images")), name="main_images")
 app.mount("/static/size-images", StaticFiles(directory=str(DATA_DIR / "size_images")), name="size_images")
+# 为前端订单商品图片提供便捷路径
+app.mount("/images", StaticFiles(directory=str(DATA_DIR / "main_images")), name="product_images")
 
 
 def _error_code(status_code: int) -> str:

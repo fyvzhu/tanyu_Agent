@@ -79,13 +79,14 @@ async function handleLogin() {
       password: formData.value.password,
     })
 
-    if (res.code === 0) {
+    // 后端返回 { success: true, data: { access_token, user } }
+    if (res.success && res.data) {
       setAccessToken(res.data.access_token)
       userStore.setUser(res.data.user)
       const redirect = route.query.redirect || '/'
       router.push(redirect)
     } else {
-      errorMessage.value = res.message || '登录失败'
+      errorMessage.value = res.error?.message || '登录失败'
     }
   } catch (error) {
     console.error('登录失败:', error)

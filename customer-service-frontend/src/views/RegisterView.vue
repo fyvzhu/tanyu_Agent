@@ -122,7 +122,8 @@ async function handleRegister() {
       confirm_password: formData.value.confirm_password,
     })
 
-    if (res.code === 0) {
+    // 后端返回 { success: true, data: { access_token, user } }
+    if (res.success && res.data) {
       // 注册成功，保存 token 和用户信息
       setAccessToken(res.data.access_token)
       userStore.setUser(res.data.user)
@@ -130,7 +131,7 @@ async function handleRegister() {
       // 跳转到主页
       router.push('/')
     } else {
-      errorMessage.value = res.message || '注册失败'
+      errorMessage.value = res.error?.message || '注册失败'
     }
   } catch (error) {
     console.error('注册失败:', error)
