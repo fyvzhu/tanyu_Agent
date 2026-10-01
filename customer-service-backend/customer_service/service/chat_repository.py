@@ -123,7 +123,7 @@ class ChatRepository:
     async def get_first_user_message(self, session_id: str) -> Optional[str]:
         """获取会话的第一条用户消息内容（用于生成标题）"""
         stmt = (
-            select(ChatMessage.text)
+            select(ChatMessage.content)
             .where(
                 ChatMessage.session_id == session_id,
                 ChatMessage.role == MessageRole.USER

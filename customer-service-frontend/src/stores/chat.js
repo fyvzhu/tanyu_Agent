@@ -2,11 +2,14 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { getSessionList, getSessionMessages, createSession as createSessionApi, closeSession as closeSessionApi } from '@/api/chat'
 
+// 用于防止过时请求覆盖
+let lastSwitchRequestId = 0
+
 export const useChatStore = defineStore('chat', () => {
   // 状态
   const sessions = ref([])
   const currentSessionId = ref(null)
-  const messages = ref([])
+  const sessionMessagesMap = ref(new Map()) // Map<sessionId, messages[]>
   const loading = ref(false)
   const total = ref(0)
 
@@ -15,12 +18,30 @@ export const useChatStore = defineStore('chat', () => {
     return sessions.value.find(s => s.session_id === currentSessionId.value)
   })
 
+  // 当前会话的消息（唯一数据源）
+  const currentMessages = computed(() => {
+    if (!currentSessionId.value) return []
+    return sessionMessagesMap.value.get(currentSessionId.value) || []
+  })
+
+  // 转换后端历史消息格式为页面格式
+  function transformHistoryMessage(backendMsg) {
+    return {
+      role: backendMsg.role === 'assistant' ? 'bot' : backendMsg.role,
+      text: backendMsg.content || '',
+      message_id: backendMsg.message_id,
+      turn_id: backendMsg.turn_id,
+      objects: backendMsg.objects || [],
+      created_at: backendMsg.created_at,
+    }
+  }
+
   // 加载会话列表
   async function loadSessions(page = 1, pageSize = 20) {
     try {
       loading.value = true
       const res = await getSessionList({ page, page_size: pageSize })
-      if (res.code === 0) {
+      if (res.success && res.data) {
         sessions.value = res.data.items
         total.value = res.data.total
       }
@@ -37,7 +58,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       loading.value = true
       const res = await createSessionApi({})
-      if (res.code === 0) {
+      if (res.success && res.data) {
         const newSession = {
           session_id: res.data.session_id,
           title: '新会话',
@@ -47,7 +68,8 @@ export const useChatStore = defineStore('chat', () => {
         }
         sessions.value.unshift(newSession)
         currentSessionId.value = res.data.session_id
-        messages.value = []
+        // 初始化空消息列表
+        sessionMessagesMap.value.set(res.data.session_id, [])
         return res.data.session_id
       }
     } catch (error) {
@@ -61,18 +83,41 @@ export const useChatStore = defineStore('chat', () => {
   // 切换会话
   async function switchSession(sessionId) {
     if (currentSessionId.value === sessionId) return
-    
+
+    // 生成请求ID，防止过时请求覆盖
+    const requestId = ++lastSwitchRequestId
+
     try {
       loading.value = true
       currentSessionId.value = sessionId
-      
-      // 加载会话消息
+
+      // 检查缓存中是否已有消息
+      if (sessionMessagesMap.value.has(sessionId)) {
+        console.log(`[ChatStore] 使用缓存消息: session=${sessionId}`)
+        return
+      }
+
+      // 从后端加载会话消息
+      console.log(`[ChatStore] 从后端加载消息: session=${sessionId}`)
       const res = await getSessionMessages(sessionId, { limit: 50 })
-      if (res.code === 0) {
-        messages.value = res.data.messages || []
+
+      // 防止过时请求覆盖当前会话
+      if (requestId !== lastSwitchRequestId) {
+        console.log(`[ChatStore] 请求已过时，忽略: request=${requestId}, current=${lastSwitchRequestId}`)
+        return
+      }
+
+      if (res.success && res.data) {
+        const messages = (res.data.messages || []).map(transformHistoryMessage)
+        sessionMessagesMap.value.set(sessionId, messages)
+        console.log(`[ChatStore] 消息加载完成: session=${sessionId}, count=${messages.length}`)
       }
     } catch (error) {
       console.error('切换会话失败:', error)
+      // 失败时初始化空数组，避免显示"加载中"
+      if (!sessionMessagesMap.value.has(sessionId)) {
+        sessionMessagesMap.value.set(sessionId, [])
+      }
       throw error
     } finally {
       loading.value = false
@@ -88,10 +133,11 @@ export const useChatStore = defineStore('chat', () => {
       if (index !== -1) {
         sessions.value.splice(index, 1)
       }
-      // 如果关闭的是当前会话，清空消息
+      // 从缓存中删除
+      sessionMessagesMap.value.delete(sessionId)
+      // 如果关闭的是当前会话，清空当前会话ID
       if (currentSessionId.value === sessionId) {
         currentSessionId.value = null
-        messages.value = []
       }
     } catch (error) {
       console.error('关闭会话失败:', error)
@@ -101,7 +147,11 @@ export const useChatStore = defineStore('chat', () => {
 
   // 添加消息到当前会话
   function addMessage(message) {
-    messages.value.push(message)
+    if (!currentSessionId.value) return
+
+    const messages = sessionMessagesMap.value.get(currentSessionId.value) || []
+    messages.push(message)
+    sessionMessagesMap.value.set(currentSessionId.value, messages)
 
     // 更新会话的 last_active_at
     const session = sessions.value.find(s => s.session_id === currentSessionId.value)
@@ -110,20 +160,16 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  // 获取指定会话的历史消息
+  // 获取指定会话的历史消息（已废弃，使用 currentMessages computed）
   function getSessionHistory(sessionId) {
-    if (currentSessionId.value === sessionId) {
-      return messages.value
-    }
-    // 如果不是当前会话，返回空数组（需要通过 switchSession 加载）
-    return []
+    return sessionMessagesMap.value.get(sessionId) || []
   }
 
   // 清空状态
   function clearAll() {
     sessions.value = []
     currentSessionId.value = null
-    messages.value = []
+    sessionMessagesMap.value.clear()
     total.value = 0
   }
 
@@ -131,7 +177,7 @@ export const useChatStore = defineStore('chat', () => {
     sessions,
     currentSessionId,
     currentSession,
-    messages,
+    currentMessages, // 导出 computed，替代旧的 messages
     loading,
     total,
     loadSessions,

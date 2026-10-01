@@ -292,6 +292,7 @@ async def send_message(
             }
 
             # P0-6/P0-7 修复：从 checkpoint 恢复 persistent state，而不是每次都初始化为 None
+            # 修复：区分"无 checkpoint"与"Redis 异常"，后者必须明确报错
             try:
                 # 尝试从 Redis checkpoint 恢复上一轮的 state
                 checkpoint_state = await graph.aget_state(config)
@@ -304,7 +305,7 @@ async def send_message(
                         f"paused_tasks={len(restored_state.get('paused_tasks', []))}"
                     )
                 else:
-                    # 首次对话，初始化空 state
+                    # 首次对话或 TTL 到期，初始化空 state
                     restored_state = {
                         "conversation_focus": None,
                         "active_task": None,
@@ -312,17 +313,18 @@ async def send_message(
                         "pending_intent_selection": None,
                         "session_user_context": SessionUserContext(member_level="regular"),
                     }
-                    logger.info(f"[{session_id}] 🆕 首次对话，初始化 persistent state")
+                    logger.info(f"[{session_id}] 🆕 首次对话或 checkpoint 已过期，初始化 persistent state")
             except Exception as e:
-                # checkpoint 读取失败，使用空 state
-                logger.warning(f"[{session_id}] ⚠️ checkpoint 恢复失败: {e}，使用空 state")
-                restored_state = {
-                    "conversation_focus": None,
-                    "active_task": None,
-                    "paused_tasks": [],
-                    "pending_intent_selection": None,
-                    "session_user_context": SessionUserContext(member_level="regular"),
-                }
+                # Redis 读取异常，不能伪装成"新会话"，必须明确报错
+                logger.error(
+                    f"[{session_id}] ❌ Redis checkpoint 读取失败: {e}，"
+                    f"为避免任务状态丢失，终止本轮处理",
+                    exc_info=True
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="会话状态服务暂时不可用，请稍后重试"
+                )
 
             # P0-6 修复：使用 TurnInitializer 重置 transient fields，保留 persistent fields
             initial_state = TurnInitializer.initialize_turn(

@@ -200,7 +200,8 @@ const router = useRouter()
 const draftMessage = ref('')
 const isSending = ref(false)
 const errorMessage = ref('')
-const messages = ref([])
+// 使用 store 的 currentMessages 作为唯一数据源
+const messages = computed(() => chatStore.currentMessages)
 const messagesContainer = ref(null)
 
 const orders = ref([])
@@ -426,31 +427,21 @@ function appendBotMessages(botMessages) {
 }
 
 function appendMessage(role, message) {
-  if (role === 'divider') {
-    messages.value.push({
-      ...createBaseMessage('divider'),
-      type: 'divider',
-      text: message.text ?? '以上为历史消息',
-    })
-    return
-  }
-
-  messages.value.push({
+  const newMessage = {
     ...createBaseMessage(role),
-    type: 'text',
-    text: message.text ?? '',
+    type: role === 'divider' ? 'divider' : 'text',
+    text: message.text ?? (role === 'divider' ? '以上为历史消息' : ''),
     objects: message.objects ?? [],
     suggestions: message.suggestions ?? null,
-  })
+    message_id: message.message_id,
+    turn_id: message.turn_id,
+  }
+
+  // 通过 store 添加消息
+  chatStore.addMessage(newMessage)
 }
 
-function setHistoryMessages(historyMessages) {
-  messages.value = []
-  for (const message of historyMessages) {
-    const role = ['user', 'bot', 'divider'].includes(message.role) ? message.role : 'bot'
-    appendMessage(role, message)
-  }
-}
+// 删除 setHistoryMessages 和 fetchChatHistory - store 已处理历史加载
 
 async function scrollToBottom() {
   await nextTick()
@@ -505,20 +496,6 @@ function handleImageError(event) {
   event.target.style.display = 'none'
 }
 
-async function fetchChatHistory() {
-  if (!chatStore.currentSessionId) {
-    messages.value = []
-    return
-  }
-
-  try {
-    const history = chatStore.getSessionHistory(chatStore.currentSessionId)
-    setHistoryMessages(Array.isArray(history) ? history : [])
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '加载历史消息失败。'
-  }
-}
-
 async function sendPayload(payload) {
   if (isSending.value) {
     return
@@ -533,11 +510,13 @@ async function sendPayload(payload) {
       ...payload,
     })
 
-    // 后端返回 ChatTurnResponse，包含 text 和 objects
-    if (response.text || response.objects) {
+    // 后端返回 {success: true, data: ChatTurnResponse}
+    if (response.data && (response.data.text || response.data.objects)) {
       appendMessage('bot', {
-        text: response.text,
-        objects: response.objects || [],
+        text: response.data.text,
+        objects: response.data.objects || [],
+        message_id: response.data.message_id,
+        turn_id: response.data.turn_id,
       })
     }
   } catch (error) {
@@ -560,7 +539,7 @@ async function sendTextMessage() {
 
   draftMessage.value = ''
   appendUserText(text)
-  await sendPayload({ text })
+  await sendPayload({ message: text })
 }
 
 async function sendOrder(order) {
@@ -570,15 +549,13 @@ async function sendOrder(order) {
 
   appendUserObject('order', { ...order })
   await sendPayload({
-    object: {
+    message: `我想查询订单 #${order.order_id}`,
+    client_context: {
       type: 'order',
-      id: order.order_id,
-      title: `订单 #${order.order_id}`,
-      attributes: {
-        status: order.status,
-        amount: order.amount,
-        created_at: order.created_at,
-      },
+      order_id: order.order_id,
+      status: order.status,
+      amount: order.amount,
+      created_at: order.created_at,
     },
   })
 }
@@ -590,18 +567,17 @@ async function sendProduct(product) {
 
   appendUserObject('product', { ...product })
   await sendPayload({
-    object: {
+    message: `我想了解商品 ${product.brand || ''} ${product.product_display_name}`.trim(),
+    client_context: {
       type: 'product',
-      id: product.product_id,
-      title: `${product.brand || ''} ${product.product_display_name}`.trim(),
-      attributes: {
-        brand: product.brand,
-        category: product.category,
-        min_price: product.min_price,
-        max_price: product.max_price,
-        main_image_url: product.main_image_url,
-        has_stock: product.has_stock,
-      },
+      product_id: product.product_id,
+      brand: product.brand,
+      product_name: product.product_display_name,
+      category: product.category,
+      min_price: product.min_price,
+      max_price: product.max_price,
+      main_image_url: product.main_image_url,
+      has_stock: product.has_stock,
     },
   })
 }
@@ -621,13 +597,7 @@ async function handleLogout() {
     console.error('Logout failed:', error)
   }
 }
-
-watch(
-  () => chatStore.currentSessionId,
-  async () => {
-    await fetchChatHistory()
-  }
-)
+// 删除旧的 watch - store 的 switchSession 已处理历史加载
 
 onMounted(async () => {
   initBg()
@@ -639,7 +609,7 @@ onMounted(async () => {
     console.error('加载会话列表失败:', error)
   }
 
-  await Promise.all([fetchSidebarData(), fetchChatHistory()])
+  await fetchSidebarData()
 })
 
 onUnmounted(() => {
