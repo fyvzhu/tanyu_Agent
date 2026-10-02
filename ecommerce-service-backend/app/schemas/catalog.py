@@ -149,6 +149,8 @@ class ProductItems(BaseModel):
     """商品列表响应"""
     items: list[ProductListItem]
     total: int = 0
+    page: int = 1
+    page_size: int = 20
 
 
 class PromotionPublic(BaseModel):

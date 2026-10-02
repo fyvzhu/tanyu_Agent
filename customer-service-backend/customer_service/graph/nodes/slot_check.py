@@ -83,23 +83,10 @@ def extract_slots_from_state(state: AgentState, intent: BusinessIntent) -> dict[
     elif "鞋" in message_lower:
         slots.setdefault("category", "鞋")
 
-    # 问题5修复：如果任务在等待 product_id，且消息是纯数字，解析为 product_id
-    if active_task and active_task.missing_slots and "product_id" in active_task.missing_slots:
-        # 检查是否是纯数字或包含数字
-        import re
-        numbers = re.findall(r'\d+', current_message.strip())
-        if numbers:
-            # 取第一个数字作为 product_id
-            slots["product_id"] = numbers[0]
-            logger.info(f"从补槽回答中提取 product_id={numbers[0]}")
-
-    # 问题5修复：如果任务在等待 order_id，且消息是纯数字，解析为 order_id
-    if active_task and active_task.missing_slots and "order_id" in active_task.missing_slots:
-        import re
-        numbers = re.findall(r'\d+', current_message.strip())
-        if numbers:
-            slots["order_id"] = numbers[0]
-            logger.info(f"从补槽回答中提取 order_id={numbers[0]}")
+    # 阶段2修复：删除简单的"取第一个数字"逻辑
+    # 原因：文档第39行指出 "用户说'预算500，商品15970'，第一个数字是 500" 会导致错误
+    # 现在槽位补填由 intent_parse_node 中的 _try_fill_missing_slots 统一处理
+    # 该函数会区分价格、商品编号，并在多个编号时拒绝自动选择
 
     # 第4步（最高优先级）：从 intent_result.entities 提取本轮明确实体
     # 这一步会覆盖前面的值

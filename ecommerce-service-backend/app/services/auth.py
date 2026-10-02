@@ -192,25 +192,29 @@ class AuthService:
 
         # 生成唯一 user_id
         from uuid import uuid4
-        user_id = f"u{uuid4().hex[:8]}"
+        user_id = f"U{uuid4().hex[:4].upper()}"
 
-        # 创建用户基础信息
-        user = await self.user_repo.create(
+        # 创建用户基础信息对象
+        from app.models.user import User
+        user_obj = User(
             user_id=user_id,
             username=username,
             nickname=nickname,
             level="普通用户",
         )
+        user = await self.user_repo.create(user_obj)
 
         # 创建用户认证信息（密码哈希）
         from app.core import hash_password
+        from app.models.user import UserAuth
         password_hash = hash_password(password)
-        await self.user_auth_repo.create(
+        user_auth_obj = UserAuth(
             user_id=user_id,
             username=username,
             password_hash=password_hash,
             status="active",
         )
+        await self.user_auth_repo.create(user_auth_obj)
 
         await self.db.commit()
 

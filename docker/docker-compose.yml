@@ -1,4 +1,4 @@
-version: '3.8'
+name: tanyu_agent
 
 services:
   # ==================== MySQL 数据库 ====================
@@ -173,11 +173,11 @@ services:
 
   # ==================== MinIO 对象存储（Langfuse v3 需要） ====================
   minio:
-    image: quay.io/minio/minio:latest
+    image: cgr.dev/chainguard/minio
     container_name: tanyu-ecommerce-minio
     restart: unless-stopped
     entrypoint: sh
-    command: -c 'mkdir -p /data/langfuse && minio server /data --console-address ":9001"'
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
     environment:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: miniosecret618
@@ -189,11 +189,11 @@ services:
     networks:
       - tanyu-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 1s
 
   # ==================== Langfuse Worker（后台任务处理） ====================
   langfuse-worker:

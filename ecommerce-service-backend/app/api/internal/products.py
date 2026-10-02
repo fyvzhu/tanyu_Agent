@@ -9,36 +9,59 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.dependencies import verify_service_token, get_catalog_service
 from app.services import CatalogService
 from app.schemas import (
-    ProductDetail,
     BatchGetProductsRequest,
     ProductKnowledgeCard,
     ApiResponse,
 )
+from app.schemas.catalog import ProductListItem
 
 router = APIRouter(prefix="/products", tags=["Internal-商品"])
 
 
-@router.post("/batch-get", summary="[Agent] 批量获取商品详情")
+@router.post("/batch-get", response_model=ApiResponse[list[ProductListItem]], summary="[Agent] 批量获取商品信息")
 async def batch_get_products(
     data: BatchGetProductsRequest,
     catalog_service: Annotated[CatalogService, Depends(get_catalog_service)],
     _verified: Annotated[bool, Depends(verify_service_token)],
 ):
     """
-    批量获取商品详情（供 Agent 使用）
-    
-    用于 Agent 在获取候选商品 ID 后，批量获取详细信息
+    批量获取商品信息（供 Agent Discovery 使用）
+
+    返回包含主图、分类、价格范围和库存的商品列表项
+    用于 Agent 组装 ProductCandidate 和 ProductCard
     """
+    from app.schemas.catalog import StockStatus
+
     products = []
     for product_id in data.product_ids:
         try:
+            # 获取商品基本信息
             product = await catalog_service.get_product_detail(product_id)
-            if product:
-                products.append(product)
+            if not product:
+                continue
+
+            # 获取该商品的所有 SKU 计算价格范围和库存
+            skus = await catalog_service.sku_repo.get_by_product_id(product_id)
+            if not skus:
+                continue
+
+            prices = [sku.price for sku in skus]
+            has_stock = any(sku.stock_status == StockStatus.IN_STOCK.value for sku in skus)
+
+            products.append(ProductListItem(
+                product_id=product.product_id,
+                brand=product.brand,
+                product_display_name=product.product_display_name,
+                category=catalog_service._compute_category(product),
+                main_image_url=catalog_service._compute_main_image_url(product.product_id),
+                min_price=min(prices),
+                max_price=max(prices),
+                has_stock=has_stock,
+            ))
         except Exception:
             # 忽略单个商品获取失败，继续处理其他商品
             continue
-    
+
     return ApiResponse(data=products)
 
 

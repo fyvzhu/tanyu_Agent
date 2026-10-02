@@ -7,6 +7,12 @@ LangGraph 节点 - Response Gen
 - 处理 Tool Result
 - 生成最终用户可见的消息
 
+参考代码4原则（retail-shopping-assistant-main）：
+- 历史用于理解指代，本轮数据用于事实陈述
+- response_gen 接受本轮 Flow 的对象和 Evidence
+- 历史消息帮助判断"这款""刚才那款"，不能当当前价格或库存来源
+- Guard 按证据类型核对，不与 Flow 成功状态混淆
+
 P1-07 修复：
 - 统一处理 FlowResult 契约
 - 所有 Flow 返回统一格式：ready_for_response, tool_result, dialogue_reason, objects
@@ -23,7 +29,7 @@ from langgraph.types import RunnableConfig
 
 from customer_service.graph.state import AgentState, TaskStatus
 from customer_service.intents.models import BusinessIntent
-from customer_service.flows.models import FlowResult
+from customer_service.flows.models import FlowResult, FlowStatus
 from customer_service.infrastructure.llm import get_llm
 from customer_service.prompts import render_prompt
 
@@ -130,11 +136,58 @@ async def response_gen_node(state: AgentState, config: RunnableConfig) -> AgentS
 
     # 统一的 FlowResult 处理
     if flow_result and isinstance(flow_result, FlowResult):
-        # 检查是否需要澄清
+        # 阶段3修复：使用 FlowStatus 枚举判断状态
+        if flow_result.status:
+            # 配置错误
+            if flow_result.status == FlowStatus.CONFIGURATION_ERROR:
+                state["response_draft"] = "抱歉，系统配置出现问题。请稍后再试或联系技术支持～"
+                state["fallback_used"] = True
+                logger.error(f"[{turn_id}] ❌ 配置错误")
+                return state
+
+            # Flow 未注册/能力未开放
+            elif flow_result.status == FlowStatus.UNSUPPORTED_FLOW:
+                state["response_draft"] = "抱歉，该功能暂未开放。您可以先尝试其他功能，或联系客服了解更多信息～"
+                state["fallback_used"] = True
+                logger.warning(f"[{turn_id}] ⚠️ Flow 未注册")
+                return state
+
+            # 下游服务错误（可重试）
+            elif flow_result.status == FlowStatus.RETRYABLE_ERROR:
+                state["response_draft"] = "抱歉，查询时遇到了一些问题。您可以稍后再试～"
+                state["fallback_used"] = True
+                logger.warning(f"[{turn_id}] ⚠️ 可重试错误")
+                return state
+
+            # 永久错误（不可重试）
+            elif flow_result.status == FlowStatus.PERMANENT_ERROR:
+                state["response_draft"] = "抱歉，无法处理您的请求。请检查输入或联系客服～"
+                state["fallback_used"] = True
+                logger.error(f"[{turn_id}] ❌ 永久错误")
+                return state
+
+            # 等待补槽（这种情况应该在 slot_check 已经处理，但保险起见）
+            elif flow_result.status == FlowStatus.WAITING_SLOT:
+                state["response_draft"] = "请问您能提供更多信息吗？"
+                logger.info(f"[{turn_id}] ℹ️ 等待补槽")
+                return state
+
+            # 成功但无结果（如空查询）
+            elif flow_result.status == FlowStatus.NO_RESULT:
+                if intent == BusinessIntent.PRODUCT_QUERY:
+                    state["response_draft"] = "抱歉，没有找到符合条件的商品。您可以换个关键词试试～"
+                elif intent == BusinessIntent.PROMOTION_QUERY:
+                    state["response_draft"] = "抱歉，该商品暂时没有优惠活动。您可以关注后续活动～"
+                else:
+                    state["response_draft"] = "抱歉，没有找到相关信息～"
+                logger.info(f"[{turn_id}] 📭 无业务结果")
+                return state
+
+        # 向后兼容：检查旧的 dialogue_reason
         if not flow_result.ready_for_response:
             if flow_result.dialogue_reason == "clarify":
                 # 从 tool_result.data 提取澄清信息
-                clarification = flow_result.tool_result.data.get("clarification", "请问您想了解什么呢？")
+                clarification = flow_result.tool_result.data.get("clarification", "请问您想了解什么呢？") if flow_result.tool_result else "请问您想了解什么呢？"
                 state["response_draft"] = clarification
                 logger.info(f"[{turn_id}] 📝 需要澄清: {clarification}")
                 return state
@@ -143,7 +196,7 @@ async def response_gen_node(state: AgentState, config: RunnableConfig) -> AgentS
                 state["response_draft"] = "请问您想了解什么呢？"
                 return state
 
-        # 检查是否有错误
+        # 检查是否有错误（向后兼容）
         if flow_result.dialogue_reason == "error":
             error_msg = "抱歉，查询时遇到了一些问题。您可以稍后再试～"
             state["response_draft"] = error_msg

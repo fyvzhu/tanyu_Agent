@@ -13,40 +13,17 @@ import asyncio
 import httpx
 import time
 from redis.asyncio import Redis
-
-
-# 测试配置
-COMMERCE_URL = "http://127.0.0.1:18081"
-AGENT_URL = "http://127.0.0.1:18082"
-REDIS_URL = "redis://:618618@localhost:6379"
-
-# 测试用户凭据（将通过Commerce服务动态获取JWT）
-TEST_USER_A = {"username": "li_ming88", "password": "Limi01Aa!26"}
-TEST_USER_B = {"username": "wang_xin23", "password": "Wang02Bb!26"}
+from test_utils import (
+    login_test_user,
+    create_chat_session,
+    send_chat_message,
+    AGENT_URL,
+    REDIS_URL
+)
 
 # 全局JWT tokens（在main中初始化）
 TEST_USER_A_TOKEN = ""
 TEST_USER_B_TOKEN = ""
-
-
-async def get_jwt_token(username: str, password: str) -> str:
-    """通过Commerce服务登录获取JWT token"""
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            resp = await client.post(
-                f"{COMMERCE_URL}/api/v1/auth/login",
-                json={"username": username, "password": password}
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                return data['data']['access_token']
-            else:
-                print(f"⚠️  登录失败: {resp.status_code} - {resp.text[:200]}")
-                # 使用测试token作为fallback
-                return f"test_token_{username}"
-        except Exception as e:
-            print(f"⚠️  无法连接到Commerce服务: {e}")
-            return f"test_token_{username}"
 
 
 async def test_1_multi_turn_conversation():
@@ -362,30 +339,19 @@ async def test_6_concurrent_lock():
 async def main():
     """运行所有测试"""
     print("🔍 问题8-B：Redis会话状态真实HTTP端到端测试")
-    print(f"Commerce URL: {COMMERCE_URL}")
     print(f"Agent URL: {AGENT_URL}")
     print(f"Redis URL: {REDIS_URL}")
 
-    # 检查Commerce服务是否运行
-    print("\n[准备] 检查Commerce服务...")
+    # 获取测试用户tokens
+    print("\n[准备] 登录测试用户...")
+    global TEST_USER_A_TOKEN, TEST_USER_B_TOKEN
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            health = await client.get(f"{COMMERCE_URL}/health/live")
-            if health.status_code != 200:
-                print("⚠️  Commerce服务未运行，将使用测试token")
-                global TEST_USER_A_TOKEN, TEST_USER_B_TOKEN
-                TEST_USER_A_TOKEN = "test_token_a"
-                TEST_USER_B_TOKEN = "test_token_b"
-            else:
-                print("✅ Commerce服务运行正常")
-                # 获取真实JWT tokens
-                print("[准备] 获取测试用户JWT tokens...")
-                TEST_USER_A_TOKEN = await get_jwt_token(TEST_USER_A["username"], TEST_USER_A["password"])
-                TEST_USER_B_TOKEN = await get_jwt_token(TEST_USER_B["username"], TEST_USER_B["password"])
-                print(f"✅ 用户A token获取成功: {TEST_USER_A_TOKEN[:50]}...")
-                print(f"✅ 用户B token获取成功: {TEST_USER_B_TOKEN[:50]}...")
+        TEST_USER_A_TOKEN = await login_test_user("user_a")
+        TEST_USER_B_TOKEN = await login_test_user("user_b")
+        print(f"✅ 用户A token获取成功: {TEST_USER_A_TOKEN[:50]}...")
+        print(f"✅ 用户B token获取成功: {TEST_USER_B_TOKEN[:50]}...")
     except Exception as e:
-        print(f"⚠️  无法连接到Commerce服务: {e}，将使用测试token")
+        print(f"⚠️  登录失败: {e}，将使用测试token")
         TEST_USER_A_TOKEN = "test_token_a"
         TEST_USER_B_TOKEN = "test_token_b"
 

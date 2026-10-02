@@ -77,6 +77,13 @@ class FocusRef(BaseModel):
 
 
 class PendingIntentSelection(BaseModel):
-    """待选择的多个 Intent"""
+    """
+    待选择的多个 Intent
+
+    根据文档第210行："在现有 candidate_intents + original_turn_id 上，
+    补充每个候选目标的少量实体和原句片段及失效规则。
+    选'促销'后要带回原句中该目标的 product_id，不能构造空实体。"
+    """
     candidate_intents: list[BusinessIntent] = Field(..., description="候选 Intent 列表")
     original_turn_id: str = Field(..., description="产生多 Intent 的 Turn ID")
+    original_entities: dict[str, Any] = Field(default_factory=dict, description="原始实体，供选择后带回")

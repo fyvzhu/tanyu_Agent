@@ -31,14 +31,13 @@ def build_product_search_tool(client: EcommerceClient, retrieval: ProductRetriev
 
         # 路径 1: RAG 检索成功，使用 product_ids 过滤
         if product_ids:
-            filter_payload = sku_filter_payload(
-                product_ids=product_ids,
-                colors=[args.color] if args.color else None,
-                sizes=[args.size] if args.size else None,
-                min_price=args.min_price,
-                max_price=args.max_price,
-                stock_status="有货" if args.in_stock_only else None,
-            )
+            # 调用标准化的SKU Filter API（使用布尔值而非"有货"字符串）
+            filter_payload = {
+                "product_ids": product_ids,
+                "colors": [args.color] if args.color else None,
+                "sizes": [args.size] if args.size else None,
+                "in_stock": True if args.in_stock_only else None,
+            }
             skus = await client.filter_skus(filter_payload)
 
             # P1-05 修复：用户硬约束不可静默放宽
@@ -83,7 +82,7 @@ def build_product_search_tool(client: EcommerceClient, retrieval: ProductRetriev
                 for item in await client.batch_get_products(list(dict.fromkeys(sku["product_id"] for sku in skus)))
             }
 
-            # 组装候选商品
+            # 组装候选商品（包含主图和价格范围）
             candidates = []
             for sku in skus:
                 product = products.get(sku["product_id"])
@@ -95,8 +94,11 @@ def build_product_search_tool(client: EcommerceClient, retrieval: ProductRetriev
                         "product_id": product_id,
                         "brand": product.get("brand"),
                         "product_display_name": product.get("product_display_name"),
-                        "material": product.get("material"),
-                        "selling_points": product.get("selling_points") or [],
+                        "category": product.get("category"),
+                        "main_image_url": product.get("main_image_url"),
+                        "min_price": product.get("min_price"),
+                        "max_price": product.get("max_price"),
+                        "has_stock": product.get("has_stock"),
                         "selected_sku": sku,
                         "score": retrieval_outcome.scores.get(product_id, 0.0),
                         "matched_reasons": retrieval_outcome.matched_reasons.get(product_id, []),
@@ -114,21 +116,48 @@ def build_product_search_tool(client: EcommerceClient, retrieval: ProductRetriev
         # 路径 2: RAG 失败，降级到 Commerce-only 模式
         else:
             logger.warning("RAG retrieval failed or unavailable, falling back to Commerce-only search")
-            data = await client.search_products(
-                {
-                    "q": args.query,
-                    "brand": args.brand,
-                    "category": args.category,
-                    "color": args.color,
-                    "size": args.size,
-                    "min_price": str(args.min_price) if args.min_price is not None else None,
-                    "max_price": str(args.max_price) if args.max_price is not None else None,
-                    "in_stock": args.in_stock_only,
-                    "page": 1,
-                    "page_size": args.top_k,
-                }
-            )
-            candidates = data.get("items", [])
+            # 构造参数，过滤掉 None 值（Commerce API 不接受 None）
+            search_params = {
+                "page": 1,
+                "page_size": args.top_k,
+            }
+            if args.query:
+                search_params["q"] = args.query
+            if args.brand:
+                search_params["brand"] = args.brand
+            if args.category:
+                search_params["category"] = args.category
+            if args.color:
+                search_params["color"] = args.color
+            if args.size:
+                search_params["size"] = args.size
+            if args.min_price is not None:
+                search_params["min_price"] = str(args.min_price)
+            if args.max_price is not None:
+                search_params["max_price"] = str(args.max_price)
+            if args.in_stock_only is not None:
+                search_params["in_stock"] = args.in_stock_only
+
+            data = await client.search_products(search_params)
+            # P7 修复: Commerce-only 路径需要统一 candidate 结构
+            # ProductListItem 没有 selected_sku，需要手动组装
+            items = data.get("items", [])
+            candidates = []
+            for item in items:
+                # 为 Commerce-only 路径补充统一结构，确保与 RAG 路径一致
+                candidates.append({
+                    "product_id": item.get("product_id"),
+                    "brand": item.get("brand"),
+                    "product_display_name": item.get("product_display_name"),
+                    "category": item.get("category"),
+                    "main_image_url": item.get("main_image_url"),
+                    "min_price": item.get("min_price"),
+                    "max_price": item.get("max_price"),
+                    "has_stock": item.get("has_stock"),
+                    "selected_sku": None,  # Commerce-only 路径无具体 SKU
+                    "score": 0.0,
+                    "matched_reasons": ["commerce_search"],
+                })
 
             # P1-05 修复：Commerce-only 模式下，严格匹配为空也不放宽
             # 检查所有硬约束：brand, category, color, size, price

@@ -102,14 +102,15 @@ class QdrantProductRetriever:
                 raise
 
     async def upsert_chunks(self, chunk_payloads: list[dict[str, Any]]) -> None:
-        """批量插入或更新 chunks"""
+        """批量插入或更新 chunks（问题 #9：使用 UUID5 作为 point ID）"""
         points = []
         for chunk in chunk_payloads:
             points.append({
-                "id": chunk["chunk_id"],
+                "id": chunk["chunk_id"],  # 使用 UUID5，确保幂等性
                 "vector": chunk["vector"],
                 "payload": {
                     "chunk_id": chunk["chunk_id"],
+                    "logical_id": chunk.get("logical_id", ""),
                     "product_id": chunk["product_id"],
                     "chunk_type": chunk["chunk_type"],
                     "text": chunk["text"],
@@ -125,6 +126,65 @@ class QdrantProductRetriever:
             json={"points": points}
         )
         response.raise_for_status()
+
+    async def delete_chunks(self, chunk_ids: list[str]) -> None:
+        """
+        删除指定的 chunks
+
+        Args:
+            chunk_ids: 要删除的 chunk ID 列表
+        """
+        if not chunk_ids:
+            return
+
+        response = await self.http.post(
+            f"{self.url}/collections/{self.collection_name}/points/delete",
+            json={"points": chunk_ids}
+        )
+        response.raise_for_status()
+
+    async def get_chunks_by_product(self, product_id: str) -> list[dict[str, Any]]:
+        """
+        获取商品的所有 chunks
+
+        Args:
+            product_id: 商品 ID
+
+        Returns:
+            chunk 列表，每个 chunk 包含 chunk_id 和其他字段
+        """
+        try:
+            response = await self.http.post(
+                f"{self.url}/collections/{self.collection_name}/points/scroll",
+                json={
+                    "filter": {
+                        "must": [
+                            {
+                                "key": "product_id",
+                                "match": {"value": product_id}
+                            }
+                        ]
+                    },
+                    "limit": 100,
+                    "with_payload": True,
+                    "with_vector": False
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+            points = data.get("result", {}).get("points", [])
+
+            return [
+                {
+                    "chunk_id": str(point["id"]),
+                    "product_id": point["payload"]["product_id"],
+                    "chunk_type": point["payload"].get("chunk_type"),
+                    "text": point["payload"].get("text"),
+                }
+                for point in points
+            ]
+        except Exception:
+            return []
 
 
 class ElasticsearchProductRetriever:
@@ -170,6 +230,70 @@ class ElasticsearchProductRetriever:
                     }
                 )
         return candidates
+
+    async def bulk_index_chunks(self, chunk_payloads: list[dict[str, Any]]) -> None:
+        """
+        批量索引 chunks（问题 #9：使用 chunk_id 作为文档 _id）
+
+        Args:
+            chunk_payloads: chunk 数据列表
+        """
+        if not chunk_payloads:
+            return
+
+        # 构建 bulk 请求
+        bulk_body = []
+        for chunk in chunk_payloads:
+            # 索引操作（使用 chunk_id 作为 _id，确保幂等性）
+            bulk_body.append({"index": {"_index": self.index_name, "_id": chunk["chunk_id"]}})
+            # 文档内容
+            bulk_body.append({
+                "chunk_id": chunk["chunk_id"],
+                "logical_id": chunk.get("logical_id", ""),
+                "product_id": chunk["product_id"],
+                "chunk_type": chunk["chunk_type"],
+                "text": chunk["text"],
+                "brand": chunk.get("brand"),
+                "category": chunk.get("category"),
+                "source_hash": chunk.get("source_hash"),
+                "index_signature": chunk.get("index_signature"),
+            })
+
+        # 发送 bulk 请求
+        response = await self.http.post(
+            f"{self.url}/_bulk",
+            headers={"Content-Type": "application/x-ndjson"},
+            content="\n".join([__import__("json").dumps(item) for item in bulk_body]) + "\n"
+        )
+        response.raise_for_status()
+
+        # 刷新索引，确保立即可见
+        await self.http.post(f"{self.url}/{self.index_name}/_refresh")
+
+    async def delete_chunks(self, chunk_ids: list[str]) -> None:
+        """
+        删除指定的 chunks
+
+        Args:
+            chunk_ids: 要删除的 chunk ID 列表
+        """
+        if not chunk_ids:
+            return
+
+        # 构建 bulk 删除请求
+        bulk_body = []
+        for chunk_id in chunk_ids:
+            bulk_body.append({"delete": {"_index": self.index_name, "_id": chunk_id}})
+
+        response = await self.http.post(
+            f"{self.url}/_bulk",
+            headers={"Content-Type": "application/x-ndjson"},
+            content="\n".join([__import__("json").dumps(item) for item in bulk_body]) + "\n"
+        )
+        response.raise_for_status()
+
+        # 刷新索引
+        await self.http.post(f"{self.url}/{self.index_name}/_refresh")
 
 
 @dataclass

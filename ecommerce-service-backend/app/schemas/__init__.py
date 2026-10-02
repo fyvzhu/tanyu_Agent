@@ -10,6 +10,7 @@ from app.schemas.common import (
 )
 from app.schemas.auth import (
     UserLoginRequest,
+    UserRegisterRequest,
     LoginRequest,
     TokenResponse,
     UserBasicInfo,
@@ -78,6 +79,7 @@ __all__ = [
     "PaginatedResponse",
     # Auth
     "UserLoginRequest",
+    "UserRegisterRequest",
     "LoginRequest",
     "TokenResponse",
     "UserBasicInfo",

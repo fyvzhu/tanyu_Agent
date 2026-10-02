@@ -29,7 +29,27 @@ class ChatMessageRequest(BaseModel):
 
 class ProductCard(BaseModel):
     """
-    商品卡片对象（出站格式）
+    商品卡片对象（前端展示格式）
+
+    ⚠️ 重要区别：ProductCard vs ProductKnowledgeCard
+
+    ProductCard（此类）：
+    - 用途：前端展示，包含实时价格/库存
+    - 数据来源：Commerce API 实时查询（/api/v1/catalog/products/{id}）
+    - 组装位置：ProductFlow 根据用户查询动态生成
+    - 价格/库存：当前时刻的真实状态
+
+    ProductKnowledgeCard（离线索引）：
+    - 用途：RAG 向量检索，只包含稳定事实
+    - 数据来源：Commerce API 知识端点（/internal/v1/products/{id}/knowledge-card）
+    - 使用位置：IndexBuilder 离线构建索引
+    - 不含实时价格/库存/用户专属信息
+
+    字段说明：
+    - min_price, max_price: 该商品所有 SKU 的当前价格区间（实时查询）
+    - selected_sku_price: 用户约束过滤后的推荐 SKU 价格（实时）
+    - stock_status: 推荐 SKU 的实时库存状态
+    - main_image_url: 当前可访问的图片地址
 
     问题修复2：按照 v7 Slice02 规范定义扁平商品卡结构
     """

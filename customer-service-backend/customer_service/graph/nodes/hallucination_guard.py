@@ -19,7 +19,7 @@ from loguru import logger
 from langgraph.types import RunnableConfig
 
 from customer_service.graph.state import AgentState
-from customer_service.intents.models import BusinessIntent
+from customer_service.intents.models import BusinessIntent, GuardStatus  # 阶段1修复：导入GuardStatus
 
 
 def extract_factual_claims(response: str) -> list[str]:
@@ -283,9 +283,9 @@ async def hallucination_guard_node(state: AgentState, config: RunnableConfig) ->
 
         state["response_draft"] = fallback_response
         state["fallback_used"] = True
-        # P1-47: 统一状态字段，同时设置 hallucination_detected 和 guard_status
+        # 阶段1修复：统一使用GuardStatus枚举
         state["hallucination_detected"] = True
-        state["guard_status"] = "hallucination_detected"  # P1-47: 供路由读取
+        state["guard_status"] = GuardStatus.FALLBACK  # 修复：使用统一的枚举值
         state["hallucination_score"] = hallucination_score
 
         logger.info(f"[{turn_id}] 🔄 使用 fallback 回复")
@@ -294,11 +294,74 @@ async def hallucination_guard_node(state: AgentState, config: RunnableConfig) ->
             f"[{turn_id}] ✅ Hallucination Guard 通过 "
             f"(score={hallucination_score:.2f}, retry_count={guard_retry_count})"
         )
-        # P1-47: 统一状态字段
+        # 阶段1修复：统一使用GuardStatus枚举
         state["hallucination_detected"] = False
-        state["guard_status"] = "passed"  # P1-47: 供路由读取
+        state["guard_status"] = GuardStatus.PASS  # 修复：使用统一的枚举值
         state["hallucination_score"] = hallucination_score
 
     logger.info(f"[{turn_id}] === 节点 5: Hallucination Guard 完成 ===")
 
+    # 阶段3修复：Guard 检查后，判断是否完成任务
+    # 根据文档第52行："在确认本轮成功且回复不会被 Guard 拒绝后，才调用 complete_current()"
+    if should_complete_task(state):
+        from customer_service.graph.task_context_manager import TaskContextManager
+        logger.info(f"[{turn_id}] 🎯 本轮任务成功且 Guard 通过，完成当前任务并恢复暂停任务")
+        state = TaskContextManager.complete_current(state, turn_id)
+    else:
+        logger.info(f"[{turn_id}] ⏸️ 本轮未完成任务（等待补槽、错误或 Guard 拦截）")
+
     return state
+
+
+def should_complete_task(state: AgentState) -> bool:
+    """
+    阶段3修复：判断是否应该完成当前任务
+
+    根据文档第52行："在确认本轮成功且回复不会被 Guard 拒绝后，才调用 complete_current()"
+
+    完成条件：
+    1. Guard 状态为 PASS（不是 FALLBACK 或 RETRY）
+    2. FlowResult 状态为 SUCCESS
+    3. tool_result.ok = True
+    4. ready_for_response = True
+
+    不完成的情况：
+    - WAITING_SLOT: 等待补槽
+    - CLARIFY: 需要澄清
+    - Tool 错误: 失败或可重试
+    - Guard 拦截: FALLBACK 或 RETRY
+
+    Args:
+        state: Agent状态
+
+    Returns:
+        是否应该完成任务
+    """
+    from customer_service.intents.models import GuardStatus
+    from customer_service.flows.models import FlowStatus
+
+    guard_status = state.get("guard_status")
+    flow_result = state.get("flow_result")
+
+    # Guard 未通过，不完成任务
+    if guard_status != GuardStatus.PASS:
+        return False
+
+    # 没有 flow_result，不完成
+    if not flow_result:
+        return False
+
+    # FlowResult 状态不是 SUCCESS，不完成
+    if flow_result.status and flow_result.status != FlowStatus.SUCCESS:
+        return False
+
+    # 未准备好响应，不完成
+    if not flow_result.ready_for_response:
+        return False
+
+    # tool_result 失败，不完成
+    if flow_result.tool_result and not flow_result.tool_result.ok:
+        return False
+
+    # 所有条件满足，可以完成
+    return True

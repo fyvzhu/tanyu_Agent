@@ -99,18 +99,24 @@ class ChatRepository:
         Returns:
             (sessions, total): 会话列表和总数
         """
-        # 查询总数
+        # 查询总数（排除已关闭的会话）
         count_stmt = (
             select(func.count(ChatSession.id))
-            .where(ChatSession.user_id == principal.user_id)
+            .where(
+                ChatSession.user_id == principal.user_id,
+                ChatSession.status != "closed"
+            )
         )
         total_result = await self.session.execute(count_stmt)
         total = total_result.scalar_one()
 
-        # 查询会话列表（按 last_active_at 降序）
+        # 查询会话列表（按 last_active_at 降序，排除已关闭的会话）
         stmt = (
             select(ChatSession)
-            .where(ChatSession.user_id == principal.user_id)
+            .where(
+                ChatSession.user_id == principal.user_id,
+                ChatSession.status != "closed"
+            )
             .order_by(ChatSession.last_active_at.desc())
             .limit(limit)
             .offset(offset)

@@ -94,7 +94,7 @@ class ProductQueryFlow:
                 return await self._execute_clarify(context, runtime)
 
         except Exception as e:
-            logger.error(f"[{runtime.session_id}] ❌ ProductQueryFlow error: {e}", exc_info=True)
+            logger.error(f"[{runtime.session_id}] ❌ ProductQueryFlow error: %s", str(e), exc_info=True)
             from customer_service.tools.models import ToolResult, ToolError
             return FlowResult(
                 ready_for_response=True,
@@ -218,7 +218,7 @@ class ProductQueryFlow:
                 context=tool_context,
             )
         except Exception as e:
-            logger.error(f"[{session_id}] ❌ ToolRuntime.execute failed: {e}", exc_info=True)
+            logger.error(f"[{session_id}] ❌ ToolRuntime.execute failed: %s", str(e), exc_info=True)
             return FlowResult(
                 ready_for_response=True,
                 tool_result=ToolResult(
@@ -276,6 +276,12 @@ class ProductQueryFlow:
 
             # 构造 ProductCard
             # 问题修复2: 确保字段与 ProductCard 模型完全匹配
+            # ⚠️ 数据来源说明：
+            # - candidate 中的数据来自 product_search_tool 的实时 Commerce API 回查
+            # - 不使用 ProductKnowledgeCard 中的任何字段（KnowledgeCard 仅用于索引）
+            # - main_image_url, title, brand: 来自 batch_get_products() 实时查询
+            # - min_price, max_price: 该商品所有 SKU 的当前价格区间（实时）
+            # - selected_sku_price, stock_status: 用户约束过滤后的推荐 SKU（实时）
             product_card = {
                 "type": "product_card",
                 "product_id": product_id,
@@ -357,12 +363,17 @@ class ProductQueryFlow:
 
         # 构造 ProductCard（使用商品的 main_image_url）
         # 问题修复2: 确保字段与 ProductCard 模型完全匹配
+        # ⚠️ 数据来源说明：
+        # - 直接查询路径：通过 product_id 精确查询 Commerce API
+        # - 数据来源：commerce.get_product_detail() 实时查询
+        # - 不使用 ProductKnowledgeCard（KnowledgeCard 仅用于离线索引）
+        # - main_image_url, min_price, max_price, stock_status: 全部来自实时 Commerce API
         return {
             "type": "product_card",
             "product_id": product.get("product_id"),
             "title": product.get("product_display_name") or product.get("name"),
             "brand": product.get("brand"),
-            "main_image_url": product.get("main_image_url"),  # 从商品详情获取
+            "main_image_url": product.get("main_image_url"),  # 从商品详情获取（实时）
             "min_price": float(min_price) if min_price is not None else None,
             "max_price": float(max_price) if max_price is not None else None,
             "selected_sku_id": selected_sku.get("sku_id") if selected_sku else None,

@@ -327,10 +327,12 @@ async def send_message(
                 )
 
             # P0-6 修复：使用 TurnInitializer 重置 transient fields，保留 persistent fields
+            # 阶段4修复：传递 client_context 用于商品/订单点击验证
             initial_state = TurnInitializer.initialize_turn(
                 state=restored_state,
                 current_message=request.message,
                 turn_id=turn_id,
+                client_context=request.client_context if request.client_context else None,
             )
 
             logger.info(f"[{session_id}] 🚀 开始执行 LangGraph...")

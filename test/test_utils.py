@@ -12,8 +12,9 @@ from typing import Optional
 
 
 # ==================== 测试配置 ====================
-COMMERCE_URL = "http://127.0.0.1:18081"
-AGENT_URL = "http://127.0.0.1:18082"
+# 使用标准端口，与生产配置一致（根据 v7 文档第17节）
+COMMERCE_URL = "http://127.0.0.1:8001"  # Commerce API 标准端口
+AGENT_URL = "http://127.0.0.1:8000"     # Agent API 标准端口
 REDIS_URL = "redis://:618618@localhost:6379"
 
 # 预定义测试用户

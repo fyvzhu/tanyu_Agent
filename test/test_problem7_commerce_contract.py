@@ -343,6 +343,244 @@ async def test_5_agent_promotion_query_complete():
     return True
 
 
+async def test_6_chatobject_persistence_and_history():
+    """
+    测试6: 问题#6 - ChatObject 持久化与历史一致性测试
+
+    验证三个关键点：
+    1. POST 响应返回完整的商品卡片
+    2. 商品卡片正确保存到数据库（objects_json 字段）
+    3. GET 历史返回的对象与 POST 响应完全一致
+    """
+    print("\n" + "=" * 60)
+    print("测试6：ChatObject 持久化与历史一致性（问题#6）")
+    print("=" * 60)
+
+    token = await login_test_user("user_a")
+    test_product_id = "15970"
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # 步骤1：创建新会话
+        resp = await client.post(
+            f"{AGENT_URL}/api/v1/chat/sessions",
+            json={"channel": "web"},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        if resp.status_code != 200:
+            print(f"❌ 创建会话失败: {resp.status_code}")
+            return False
+
+        session_id = resp.json()["data"]["session_id"]
+        print(f"✅ 会话创建成功: {session_id}")
+
+        # 步骤2：发送商品查询，记录 POST 响应的 objects
+        resp = await client.post(
+            f"{AGENT_URL}/api/v1/chat/sessions/{session_id}/messages",
+            json={"message": f"查询商品{test_product_id}"},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        if resp.status_code != 200:
+            print(f"❌ 消息发送失败: {resp.status_code} - {resp.text}")
+            return False
+
+        post_response = resp.json()["data"]
+        post_message_id = post_response["message_id"]
+        post_objects = post_response.get("objects", [])
+
+        print(f"✅ POST 响应: message_id={post_message_id}, objects_count={len(post_objects)}")
+
+        # 验证：POST 响应必须包含商品卡片
+        if not post_objects:
+            print(f"❌ 问题#6失败: POST 响应未返回商品对象")
+            print(f"   回复文本: {post_response.get('text', '')[:100]}")
+            return False
+
+        product_cards = [obj for obj in post_objects if obj.get("type") == "product_card"]
+        if not product_cards:
+            print(f"❌ 问题#6失败: POST 响应未返回 product_card 类型")
+            print(f"   对象类型: {[obj.get('type') for obj in post_objects]}")
+            return False
+
+        post_card = product_cards[0]
+        print(f"✅ POST 商品卡片: product_id={post_card.get('product_id')}, title={post_card.get('title')}")
+
+        # 验证：商品卡片字段完整性
+        required_fields = ["type", "product_id", "title"]
+        missing_fields = [f for f in required_fields if not post_card.get(f)]
+        if missing_fields:
+            print(f"❌ 问题#6失败: POST 商品卡片缺少必需字段: {missing_fields}")
+            print(f"   卡片内容: {post_card}")
+            return False
+
+        # 验证：不应该是空壳卡片
+        empty_shell = {
+            "type": "product_card",
+            "product": None,
+            "sku": None,
+            "assets": None,
+            "data": {}
+        }
+        if (post_card.get("product") is None and
+            post_card.get("sku") is None and
+            post_card.get("data") == {}):
+            print(f"❌ 问题#6失败: POST 返回了空壳商品卡片")
+            print(f"   这是旧 Schema 的问题，应该返回扁平结构")
+            return False
+
+        print(f"✅ POST 商品卡片结构完整且非空壳")
+
+        # 步骤3：立即 GET 历史，验证对象一致性
+        resp = await client.get(
+            f"{AGENT_URL}/api/v1/chat/sessions/{session_id}/messages",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        if resp.status_code != 200:
+            print(f"❌ 获取历史失败: {resp.status_code}")
+            return False
+
+        history = resp.json()["data"]["messages"]
+
+        # 找到对应的 assistant 消息
+        assistant_message = None
+        for msg in history:
+            if msg["role"] == "assistant" and msg["message_id"] == post_message_id:
+                assistant_message = msg
+                break
+
+        if not assistant_message:
+            print(f"❌ 问题#6失败: 历史中找不到 message_id={post_message_id} 的消息")
+            return False
+
+        history_objects = assistant_message.get("objects", [])
+        print(f"✅ GET 历史: message_id={post_message_id}, objects_count={len(history_objects)}")
+
+        # 验证：历史对象不应为空
+        if not history_objects:
+            print(f"❌ 问题#6失败: 历史消息的 objects 为空")
+            print(f"   这表明 objects_json 没有正确保存到数据库")
+            return False
+
+        # 验证：历史对象数量应与 POST 响应一致
+        if len(history_objects) != len(post_objects):
+            print(f"❌ 问题#6失败: 历史对象数量 ({len(history_objects)}) 与 POST 响应 ({len(post_objects)}) 不一致")
+            return False
+
+        # 验证：历史商品卡片字段应与 POST 响应完全一致
+        history_cards = [obj for obj in history_objects if obj.get("type") == "product_card"]
+        if not history_cards:
+            print(f"❌ 问题#6失败: 历史中没有 product_card 类型对象")
+            return False
+
+        history_card = history_cards[0]
+
+        # 逐字段比较
+        critical_fields = ["type", "product_id", "title", "brand", "main_image_url"]
+        for field in critical_fields:
+            post_value = post_card.get(field)
+            history_value = history_card.get(field)
+            if post_value != history_value:
+                print(f"❌ 问题#6失败: 字段 '{field}' 不一致")
+                print(f"   POST: {post_value}")
+                print(f"   历史: {history_value}")
+                return False
+
+        print(f"✅ 历史商品卡片与 POST 响应完全一致")
+
+        # 步骤4：测试图片 URL 可访问性（如果存在）
+        if post_card.get("main_image_url"):
+            image_url = post_card["main_image_url"]
+            if image_url.startswith("/static/"):
+                # 转换为完整 URL
+                full_image_url = f"{COMMERCE_URL}{image_url}"
+                try:
+                    img_resp = await client.get(full_image_url, timeout=5.0)
+                    if img_resp.status_code == 200:
+                        print(f"✅ 图片 URL 可访问: {image_url}")
+                    else:
+                        print(f"⚠️  图片 URL 返回 {img_resp.status_code}: {image_url}")
+                except Exception as e:
+                    print(f"⚠️  图片访问异常: {e}")
+
+    print("✅ 测试6通过：ChatObject 持久化与历史一致性验证成功")
+    return True
+
+
+async def test_7_empty_shell_rejection():
+    """
+    测试7: 问题#6 - 空壳商品卡片拒绝测试（Schema 层）
+
+    验证 ProductCard 模型不会接受空壳对象
+    """
+    print("\n" + "=" * 60)
+    print("测试7：空壳商品卡片拒绝测试（问题#6）")
+    print("=" * 60)
+
+    # 动态导入，添加正确的路径
+    import sys
+    from pathlib import Path
+    backend_path = Path(__file__).parent.parent / "customer-service-backend"
+    if str(backend_path) not in sys.path:
+        sys.path.insert(0, str(backend_path))
+
+    from customer_service.schemas.chat import ProductCard
+    from pydantic import ValidationError
+
+    # 测试1：完整的商品卡片应该通过
+    try:
+        valid_card = ProductCard(
+            type="product_card",
+            product_id="15970",
+            title="测试商品",
+            brand="测试品牌",
+            main_image_url="/static/main-images/15970.jpg",
+            min_price=100.0,
+            max_price=200.0
+        )
+        print(f"✅ 完整商品卡片验证通过: {valid_card.product_id}")
+    except ValidationError as e:
+        print(f"❌ 完整商品卡片验证失败（不应该）: {e}")
+        return False
+
+    # 测试2：缺少 product_id 应该失败
+    try:
+        invalid_card = ProductCard(
+            type="product_card",
+            title="测试商品"
+        )
+        print(f"❌ 缺少 product_id 的卡片通过验证（不应该）")
+        return False
+    except ValidationError:
+        print(f"✅ 缺少 product_id 的卡片正确拒绝")
+
+    # 测试3：缺少 title 应该失败
+    try:
+        invalid_card = ProductCard(
+            type="product_card",
+            product_id="15970"
+        )
+        print(f"❌ 缺少 title 的卡片通过验证（不应该）")
+        return False
+    except ValidationError:
+        print(f"✅ 缺少 title 的卡片正确拒绝")
+
+    # 测试4：type 错误应该失败
+    try:
+        invalid_card = ProductCard(
+            type="wrong_type",
+            product_id="15970",
+            title="测试商品"
+        )
+        print(f"❌ type 错误的卡片通过验证（不应该）")
+        return False
+    except ValidationError:
+        print(f"✅ type 错误的卡片正确拒绝")
+
+    print("✅ 测试7通过：Schema 正确拒绝无效商品卡片")
+    return True
+
+
 async def main():
     print("=" * 60)
     print("问题7修复验证：Commerce 跨服务契约")
@@ -383,6 +621,22 @@ async def main():
         print(f"❌ 测试5异常: {e}")
         results["test_5"] = False
 
+    try:
+        results["test_6"] = await test_6_chatobject_persistence_and_history()
+    except Exception as e:
+        print(f"❌ 测试6异常: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_6"] = False
+
+    try:
+        results["test_7"] = await test_7_empty_shell_rejection()
+    except Exception as e:
+        print(f"❌ 测试7异常: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_7"] = False
+
     # 总结
     print("\n" + "=" * 60)
     print("测试总结")
@@ -399,6 +653,7 @@ async def main():
     if passed == total:
         print("✅ 所有测试通过！问题7修复验证完成！")
         print("   包含问题修复2的对象契约验证")
+        print("   包含问题#6的持久化与历史一致性验证")
         return 0
     else:
         print("❌ 部分测试失败，需要进一步修复")

@@ -44,6 +44,13 @@ export const useChatStore = defineStore('chat', () => {
       if (res.success && res.data) {
         sessions.value = res.data.items
         total.value = res.data.total
+
+        // 修复问题2：如果没有当前会话且列表不为空，自动选择第一个
+        if (!currentSessionId.value && sessions.value.length > 0) {
+          const firstSessionId = sessions.value[0].session_id
+          console.log(`[ChatStore] 自动选择第一个会话: ${firstSessionId}`)
+          await switchSession(firstSessionId)
+        }
       }
     } catch (error) {
       console.error('加载会话列表失败:', error)

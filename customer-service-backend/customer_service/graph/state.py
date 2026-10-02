@@ -26,6 +26,8 @@ from customer_service.intents.models import (
     IntentResult,
     IntentDecision,
     IntentFallbackReason,
+    TurnAction,      # 阶段1修复：导入TurnAction枚举
+    GuardStatus,     # 阶段1修复：导入GuardStatus枚举
 )
 from customer_service.schemas.foundation import (
     PendingConfirmation,
@@ -142,3 +144,11 @@ class AgentState(TypedDict, total=False):
     resumed_this_turn: bool
     guard_retry_count: int
     fallback_used: bool
+    turn_action: TurnAction | None  # 阶段1修复：使用TurnAction枚举
+    guard_status: GuardStatus | None  # 阶段1修复：使用GuardStatus枚举
+    hallucination_detected: bool | None
+    hallucination_score: float | None
+
+    # 阶段4修复：客户端对象点击（不持久化）
+    client_context: dict[str, Any] | None  # 原始客户端上下文（不信任）
+    verified_object_id: dict[str, str] | None  # 验证后的对象引用 {"type": "product/order", "id": "xxx"}

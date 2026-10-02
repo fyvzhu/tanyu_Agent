@@ -40,9 +40,19 @@ from customer_service.graph.state import (
     ActionMode,
 )
 from customer_service.graph.task_context_manager import TaskContextManager
-from customer_service.intents.models import BusinessIntent, IntentFallbackReason
+from customer_service.intents.models import (
+    BusinessIntent,
+    IntentFallbackReason,
+    TurnAction,
+    IntentClassificationResult,
+    TurnDecision,
+)
 from customer_service.intents.policies import get_intent_policy
 from customer_service.tasking.models import PendingIntentSelection
+from customer_service.intents.classifier import IntentClassifier, adapt_intent_result_to_classification
+from customer_service.intents.validator import IntentDecisionValidator
+from customer_service.tasking.command_processor import TaskCommandProcessor
+from customer_service.prompts.history_builder import HistoryBuilder
 
 
 async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentState:
@@ -66,11 +76,27 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
     logger.info(f"[{turn_id}] === 节点 1: Intent Parse 开始 ===")
     logger.debug(f"[{turn_id}] 用户输入: '{current_message[:100]}...'")
 
-    # ===== 问题4修复: 优先处理取消请求 =====
-    # 取消优先级最高，在所有其他处理之前
+    # ===== 参考代码3修复: 状态优先解释层 =====
+    # 优先级顺序（参考 E-commerce-AI-Agent-main/orchestrator._safe_route）：
+    # 1. 取消请求（最高优先级）
+    # 2. pending_intent_selection（多意图选择）
+    # 3. WAITING_SLOT（等待槽位填充）
+    # 4. 常规意图识别
+
     active_task = state.get("active_task")
     pending_selection = state.get("pending_intent_selection")
 
+    # P0 修复：处理从 Redis 恢复的 LangChain 序列化格式
+    if active_task and isinstance(active_task, dict):
+        from customer_service.tasking.models import TaskFrame
+        if 'kwargs' in active_task and 'lc' in active_task:
+            active_task = TaskFrame(**active_task['kwargs'])
+            state["active_task"] = active_task  # 更新为对象
+        elif 'task_id' in active_task:  # 普通字典格式
+            active_task = TaskFrame(**active_task)
+            state["active_task"] = active_task
+
+    # 优先级1: 取消请求
     if (active_task or pending_selection) and _is_cancel_request(current_message):
         logger.info(f"[{turn_id}] ❌ 检测到取消请求")
 
@@ -86,6 +112,9 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
                 turn_id=turn_id,
             )
 
+        # 阶段1修复：使用TurnAction枚举
+        state["turn_action"] = TurnAction.CANCEL
+
         # 返回取消确认
         intent_result = IntentResult(
             recognized=False,
@@ -98,7 +127,7 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
         logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（取消）===")
         return state
 
-    # ===== 问题4修复: 处理 pending_intent_selection =====
+    # 优先级2: pending_intent_selection（多意图选择）
     if pending_selection:
         logger.info(f"[{turn_id}] 🔍 检测到 pending_intent_selection，尝试解析用户选择")
 
@@ -117,6 +146,9 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
 
             # 清空 pending_intent_selection
             state["pending_intent_selection"] = None
+
+            # 阶段1修复：使用TurnAction枚举
+            state["turn_action"] = TurnAction.ACCEPT
 
             # 构造 IntentResult（直接 ACCEPT）
             policy = get_intent_policy(selected_intent)
@@ -144,6 +176,10 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
         else:
             # 解析失败，返回澄清提示
             logger.warning(f"[{turn_id}] ❌ 无法解析用户选择，返回 CLARIFY")
+
+            # 阶段1修复：使用TurnAction枚举
+            state["turn_action"] = TurnAction.SELECT_INTENT
+
             intent_result = IntentResult(
                 recognized=False,
                 intent=None,
@@ -158,174 +194,231 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
 
     # ===== 取消检测已移到最前面，这里删除重复代码 =====
 
-    # ===== 调用真实的 Intent Classifier =====
-    from customer_service.intents.classifier import IntentClassifier
+    # ===== 优先级3: WAITING_SLOT 状态优先解释（参考代码3）=====
+    # 参考 E-commerce-AI-Agent-main/orchestrator._safe_route
+    # 文档第121行："刚问'想查哪款商品的优惠'，用户回复'15970'，应先进入促销 Task 的商品槽位校验"
+    #
+    # 核心原则：当前任务等待槽位时，短输入优先解析为槽位填充，而不是新意图
+    from customer_service.graph.state import TaskStatus
 
+    if active_task and active_task.status == TaskStatus.WAITING_SLOT:
+        logger.info(f"[{turn_id}] 🔄 当前任务正在等待槽位，优先尝试补槽")
+
+        # 检查是否是明确的新业务目标（通过关键词判断）
+        if _is_new_explicit_goal(current_message):
+            logger.info(f"[{turn_id}] 🆕 检测到明确的新业务目标，切换任务")
+            # 继续走正常分类流程
+        else:
+            # 尝试解析为槽位回答
+            slot_filled = _try_fill_missing_slots(state, active_task, current_message, turn_id)
+
+            if slot_filled:
+                logger.info(f"[{turn_id}] ✅ 成功补充槽位，继续当前任务")
+                state["turn_action"] = TurnAction.ACCEPT
+
+                # 构造 IntentResult（继续当前任务）
+                intent_result = IntentResult(
+                    recognized=True,
+                    intent=active_task.intent,
+                    decision=IntentDecision.ACCEPT,
+                    confidence=1.0,
+                    entities=active_task.slots,
+                )
+                state["intent_result"] = intent_result
+
+                # 使用 CommandProcessor 继续任务
+                processor = TaskCommandProcessor()
+                from customer_service.tasking.commands import ContinueTaskCommand
+                state = processor.run(state, [ContinueTaskCommand()], turn_id)
+
+                logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（补槽成功）===")
+                return state
+            else:
+                logger.info(f"[{turn_id}] ⚠️ 无法解析为槽位回答，走正常分类流程")
+                # 继续走正常分类流程
+
+    # ===== 阶段1重构：三层架构（分类器→验证器→决策）=====
+    # P1-40修复：从数据库获取历史对话，传递给分类器增强上下文理解
+
+    # 获取历史对话
+    history_str = await _get_conversation_history(state, turn_id)
+
+    # 第1层：分类器 - 提出候选目标（传入历史对话）
     classifier = IntentClassifier()
-    classification_result = classifier.classify(current_message)
+    old_result = classifier.classify(current_message, history=history_str)
 
-    # 问题4修复: 处理分类器返回的 CLARIFY (包括 MULTIPLE_INTENTS 原因)
-    if classification_result.decision == IntentDecision.CLARIFY:
-        # 检查是否是多意图情况
-        if (classification_result.fallback_reason == IntentFallbackReason.MULTIPLE_INTENTS
-            and len(classification_result.candidate_intents) >= 2):
-            logger.info(
-                f"[{turn_id}] 🔀 检测到多意图: {[i.value for i in classification_result.candidate_intents]}, "
-                f"margin={classification_result.margin:.2f}"
-            )
-
-            # 创建 pending_intent_selection
-            state["pending_intent_selection"] = PendingIntentSelection(
-                candidate_intents=classification_result.candidate_intents,
-                original_turn_id=turn_id,
-            )
-
-            # 保留分类器的原始 IntentResult
-            state["intent_result"] = classification_result
-            logger.info(f"[{turn_id}] ⏸️ 等待用户选择意图，不启动任务")
-            logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（多意图）===")
-            return state
-        else:
-            # 其他 CLARIFY 原因：LOW_CONFIDENCE 等
-            logger.info(
-                f"[{turn_id}] ❓ 需要澄清: reason={classification_result.fallback_reason}, "
-                f"confidence={classification_result.confidence:.2f}"
-            )
-            # 保留分类器的原始决策
-            state["intent_result"] = classification_result
-            logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（澄清）===")
-            return state
-
-    # 问题4修复: 保留 OUT_OF_SCOPE 和 CLASSIFIER_FAILURE 的原始决策
-    if classification_result.decision in (IntentDecision.OUT_OF_SCOPE, IntentDecision.CLASSIFIER_FAILURE):
-        logger.warning(
-            f"[{turn_id}] ⚠️ 分类器决策: {classification_result.decision.value}, "
-            f"reason={classification_result.fallback_reason}"
-        )
-        # 保留原始决策，不做任何改写
-        state["intent_result"] = classification_result
-        logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成 ===")
-        return state
-
-    # 问题4修复: 只有 ACCEPT 才进入任务管理
-    # 不再尝试调用 BusinessIntent(None) 导致 ValueError
-    if classification_result.decision != IntentDecision.ACCEPT or not classification_result.intent:
-        logger.warning(
-            f"[{turn_id}] ⚠️ 意图未被接受: decision={classification_result.decision.value}, "
-            f"intent={classification_result.intent}"
-        )
-        state["intent_result"] = classification_result
-        logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成 ===")
-        return state
-
-    # 映射到 BusinessIntent
-    intent = classification_result.intent
-    recognized = True
-    logger.info(
-        f"[{turn_id}] 🎯 Intent 识别结果: {intent.value}, "
-        f"confidence={classification_result.confidence:.2f}"
+    # 第2层：适配器 - 转换为新格式
+    classification: IntentClassificationResult = adapt_intent_result_to_classification(
+        old_result,
+        current_message
     )
 
-    # P1-06 修复问题 2：ActionMode 必须基于 IntentPolicy，不能硬编码
-    # urge_order_payment 的 requires_action_request=False，不应进入 ACTION_REQUEST
-    policy = get_intent_policy(intent)
-    if policy.requires_action_request:
-        action_mode = ActionMode.ACTION_REQUEST
-    else:
-        action_mode = ActionMode.INFORMATIONAL
+    # 第3层：验证器 - 根据规则决策
+    validator = IntentDecisionValidator()
+    decision: TurnDecision = validator.validate(state, classification)
 
-    # 使用分类器返回的完整 IntentResult，只更新 action_mode
-    intent_result = IntentResult(
-        recognized=True,
-        intent=intent,
-        decision=IntentDecision.ACCEPT,
-        confidence=classification_result.confidence,
-        second_confidence=classification_result.second_confidence,
-        margin=classification_result.margin,
-        entities=classification_result.entities or {},
-        action_mode=action_mode,
-    )
+    logger.info(f"[{turn_id}] 🔍 决策结果: action={decision.action.value}, reason={decision.reason}")
 
-    state["intent_result"] = intent_result
+    # ===== 根据 TurnDecision.action 设置 turn_action 和状态 =====
+    state["turn_action"] = decision.action
 
-    # ===== Task 管理逻辑 =====
-    # P1-48 修复：闲聊不启动新任务，保留原 active_task
-    if intent == BusinessIntent.CHITCHAT:
-        active_task = state.get("active_task")
-        if active_task:
-            # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式
-            if isinstance(active_task, dict):
-                from customer_service.tasking.models import TaskFrame
-                # 检查是否是 LangChain 序列化格式 (包含 'lc', 'type', 'kwargs')
-                if 'kwargs' in active_task and 'lc' in active_task:
-                    active_task = TaskFrame(**active_task['kwargs'])
-                else:
-                    active_task = TaskFrame(**active_task)
-                state["active_task"] = active_task
+    # 处理不同的决策动作
+    if decision.action == TurnAction.CLASSIFIER_FAILURE:
+        # 分类器失败
+        state["intent_result"] = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.CLASSIFIER_FAILURE,
+            confidence=0.0,
+            entities={},
+        )
+        logger.warning(f"[{turn_id}] ❌ 分类器失败: {decision.reason}")
+        return state
 
-            # 有活跃任务时，闲聊不打断，直接返回
-            logger.info(
-                f"[{turn_id}] 💬 检测到闲聊插话，保留原任务: {active_task.intent}"
+    elif decision.action == TurnAction.OUT_OF_SCOPE:
+        # 超出范围
+        state["intent_result"] = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.OUT_OF_SCOPE,
+            confidence=0.0,
+            entities={},
+        )
+        logger.info(f"[{turn_id}] 🚫 超出范围: {decision.reason}")
+        return state
+
+    elif decision.action == TurnAction.CLARIFY:
+        # 需要澄清（低置信度）
+        state["intent_result"] = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.CLARIFY,
+            fallback_reason=IntentFallbackReason.LOW_CONFIDENCE,
+            confidence=0.5,
+            entities={},
+        )
+        logger.info(f"[{turn_id}] ❓ 需要澄清: {decision.reason}")
+        return state
+
+    elif decision.action == TurnAction.SELECT_INTENT:
+        # 多目标，需要用户选择
+        if not decision.clarify_options or len(decision.clarify_options) < 2:
+            logger.error(f"[{turn_id}] ⚠️ SELECT_INTENT但缺少clarify_options")
+            state["turn_action"] = TurnAction.CLARIFY
+            state["intent_result"] = IntentResult(
+                recognized=False,
+                intent=None,
+                decision=IntentDecision.CLARIFY,
+                confidence=0.0,
+                entities={},
             )
-            # 不调用 TaskContextManager，直接返回
-            # ResponseGen 会根据 CHITCHAT intent 生成简短回复
             return state
+
+        # 创建 pending_intent_selection
+        candidate_intents = [goal.intent for goal in decision.clarify_options]
+        state["pending_intent_selection"] = PendingIntentSelection(
+            candidate_intents=candidate_intents,
+            original_turn_id=turn_id,
+        )
+
+        state["intent_result"] = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.CLARIFY,
+            fallback_reason=IntentFallbackReason.MULTIPLE_INTENTS,
+            confidence=0.8,
+            candidate_intents=candidate_intents,
+            entities={},
+        )
+        logger.info(f"[{turn_id}] 🔀 多目标: {[i.value for i in candidate_intents]}")
+        return state
+
+    elif decision.action == TurnAction.UNSUPPORTED:
+        # 识别了但未开放
+        state["intent_result"] = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.CLARIFY,
+            confidence=0.7,
+            entities={},
+        )
+        logger.info(f"[{turn_id}] 🚧 功能未开放: {decision.reason}")
+        return state
+
+    elif decision.action == TurnAction.CHITCHAT:
+        # 闲聊 - 不启动任务
+        if not decision.accepted_goal:
+            logger.error(f"[{turn_id}] ⚠️ CHITCHAT但缺少accepted_goal")
+            state["turn_action"] = TurnAction.CLARIFY
+            return state
+
+        intent = decision.accepted_goal.intent
+        entities = decision.accepted_goal.entities
+
+        state["intent_result"] = IntentResult(
+            recognized=True,
+            intent=intent,
+            decision=IntentDecision.ACCEPT,
+            confidence=decision.accepted_goal.confidence or 0.8,
+            entities=entities,
+            action_mode=ActionMode.INFORMATIONAL,
+        )
+
+        # 闲聊不启动任务（参考文档 P0-6）
+        logger.info(f"[{turn_id}] 💬 闲聊，不启动任务")
+        return state
+
+    elif decision.action == TurnAction.ACCEPT:
+        # 接受目标 - 使用 CommandProcessor 执行命令
+        if not decision.accepted_goal:
+            logger.error(f"[{turn_id}] ⚠️ ACCEPT但缺少accepted_goal")
+            state["turn_action"] = TurnAction.CLARIFY
+            return state
+
+        intent = decision.accepted_goal.intent
+        entities = decision.accepted_goal.entities
+
+        # 获取 IntentPolicy
+        policy = get_intent_policy(intent)
+        action_mode = ActionMode.ACTION_REQUEST if policy.requires_action_request else ActionMode.INFORMATIONAL
+
+        state["intent_result"] = IntentResult(
+            recognized=True,
+            intent=intent,
+            decision=IntentDecision.ACCEPT,
+            confidence=decision.accepted_goal.confidence or 0.8,
+            entities=entities,
+            action_mode=action_mode,
+        )
+
+        # 使用 CommandProcessor 执行命令（阶段1重构）
+        if decision.commands:
+            processor = TaskCommandProcessor()
+            state = processor.run(state, decision.commands, turn_id)
+            logger.info(f"[{turn_id}] 🔧 执行了 {len(decision.commands)} 条命令")
         else:
-            # 没有活跃任务时，可以启动闲聊任务（首次对话场景）
-            logger.info(f"[{turn_id}] 💬 首次对话闲聊，启动闲聊任务")
+            # 兼容：如果验证器没有生成命令，回退到旧逻辑
             state = TaskContextManager.start_task(
                 state,
                 intent=intent,
                 turn_id=turn_id,
             )
-            return state
+            logger.info(f"[{turn_id}] 🆕 启动任务（旧逻辑）: {intent.value}")
 
-    logger.info(
-        f"[{turn_id}] ✅ 识别意图: {intent.value}, "
-        f"confidence={classification_result.confidence:.2f}, "
-        f"action_mode={action_mode.value if action_mode else 'None'}"
-    )
+        return state
 
-    active_task = state.get("active_task")
-
-    if not active_task:
-        # 没有 active_task，启动新任务
-        state = TaskContextManager.start_task(
-            state,
-            intent=intent_result.intent,
-            turn_id=turn_id,
-        )
-        logger.info(f"[{turn_id}] 🆕 启动新任务: {intent_result.intent}")
     else:
-        # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式
-        if isinstance(active_task, dict):
-            from customer_service.tasking.models import TaskFrame
-            # 检查是否是 LangChain 序列化格式 (包含 'lc', 'type', 'kwargs')
-            if 'kwargs' in active_task and 'lc' in active_task:
-                active_task = TaskFrame(**active_task['kwargs'])
-            else:
-                active_task = TaskFrame(**active_task)
-            state["active_task"] = active_task
-
-        # 有 active_task
-        if active_task.intent == intent_result.intent:
-            # 继续当前任务
-            state = TaskContextManager.continue_current(state, turn_id)
-            logger.info(f"[{turn_id}] ➡️ 继续当前任务: {active_task.intent}")
-        else:
-            # 不同意图，暂停当前任务并启动新任务
-            state = TaskContextManager.start_task(
-                state,
-                intent=intent_result.intent,
-                turn_id=turn_id,
-            )
-            logger.info(
-                f"[{turn_id}] 🔄 切换任务: "
-                f"{active_task.intent} → {intent_result.intent}"
-            )
-
-    logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成 ===")
-    return state
+        # 未知 action
+        logger.error(f"[{turn_id}] ❌ 未知的 TurnAction: {decision.action}")
+        state["turn_action"] = TurnAction.CLARIFY
+        state["intent_result"] = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.CLASSIFIER_FAILURE,
+            confidence=0.0,
+            entities={},
+        )
+        return state
 
 
 def _parse_intent_selection(user_message: str, candidate_intents: list[BusinessIntent]) -> BusinessIntent | None:
@@ -404,3 +497,205 @@ def _is_cancel_request(user_message: str) -> bool:
 
     # 简单关键词匹配
     return any(keyword in message for keyword in cancel_keywords)
+
+
+def _is_new_explicit_goal(message: str) -> bool:
+    """
+    阶段2修复：检测用户消息是否是明确的新业务目标
+
+    根据文档第194行："若这轮明确提出新的完整业务目标，才挂起旧任务并切换"
+
+    判断标准：
+    - 包含明确的业务关键词（推荐、查询、优惠、物流等）
+    - 不是单纯的数字、颜色、价格回答
+
+    Args:
+        message: 用户消息
+
+    Returns:
+        是否是明确的新目标
+    """
+    message = message.strip()
+
+    # 单纯的短回复（数字、颜色、确认词）不是新目标
+    if len(message) <= 10:
+        # 纯数字或带单位的数字
+        if message.replace(" ", "").replace("元", "").replace("以内", "").replace(".", "").isdigit():
+            return False
+        # 颜色词
+        if message in ["红色", "黑色", "白色", "蓝色", "绿色", "黄色", "第一个", "第二个", "第三个"]:
+            return False
+        # 确认词
+        if message in ["是", "好的", "确认", "对", "嗯", "ok", "可以"]:
+            return False
+
+    # 包含明确业务关键词的才算新目标
+    goal_keywords = [
+        "推荐", "查", "看", "搜索", "找", "要", "买", "购买",
+        "优惠", "促销", "折扣", "活动",
+        "物流", "发货", "快递", "订单",
+        "退货", "换货", "退款",
+        "尺码", "大小", "型号"
+    ]
+
+    return any(keyword in message for keyword in goal_keywords)
+
+
+def _try_fill_missing_slots(
+    state: AgentState,
+    task: any,
+    message: str,
+    turn_id: str
+) -> bool:
+    """
+    阶段2修复：智能槽位补填 - 解决P0-4问题
+
+    根据文档第39行："用户说'预算500，商品15970'，第一个数字是 500；
+    说'15970和39386哪款有优惠'，又会在需要唯一商品时任取 15970"
+
+    改进策略：
+    - 区分价格、商品编号、序数指代
+    - 多个疑似编号时不自动选择，返回False让系统询问
+    - 带单位的数字优先解析为价格
+
+    Args:
+        state: Agent状态
+        task: 当前任务
+        message: 用户消息
+        turn_id: 轮次ID
+
+    Returns:
+        是否成功补充槽位
+    """
+    import re
+    from customer_service.tasking.models import TaskFrame, TaskStatus
+
+    if not task.missing_slots:
+        return False
+
+    # 确保 task 是 TaskFrame 对象
+    if isinstance(task, dict):
+        task = TaskFrame(**task.get("kwargs", task))
+        state["active_task"] = task
+
+    message = message.strip()
+    logger.info(f"[{turn_id}] 🔍 尝试从 '{message}' 中提取槽位: {task.missing_slots}")
+
+    # 提取所有数字
+    numbers = re.findall(r'\d+', message)
+
+    if not numbers:
+        logger.info(f"[{turn_id}] ⚠️ 消息中没有数字")
+        return False
+
+    # === 补充 product_id ===
+    if "product_id" in task.missing_slots:
+        # 检查是否是价格表达（带"元"、"预算"、"以内"等）
+        if any(keyword in message for keyword in ["元", "预算", "以内", "左右", "块钱"]):
+            logger.info(f"[{turn_id}] ⚠️ 检测到价格关键词，不解析为商品编号")
+            return False
+
+        # 检查是否有多个疑似编号
+        # 商品编号通常是4-6位数字
+        product_ids = [n for n in numbers if len(n) >= 4 and len(n) <= 6]
+
+        if len(product_ids) == 0:
+            logger.info(f"[{turn_id}] ⚠️ 没有找到符合商品编号格式的数字（4-6位）")
+            return False
+
+        if len(product_ids) > 1:
+            logger.info(f"[{turn_id}] ⚠️ 发现多个疑似商品编号 {product_ids}，需要用户明确选择")
+            return False
+
+        # 唯一编号，验证并填充
+        product_id = product_ids[0]
+        task.slots["product_id"] = product_id
+        task.missing_slots.remove("product_id")
+        logger.info(f"[{turn_id}] ✅ 成功提取 product_id={product_id}")
+        return True
+
+    # === 补充 order_id ===
+    if "order_id" in task.missing_slots:
+        # 订单号通常更长（8位以上）
+        order_ids = [n for n in numbers if len(n) >= 8]
+
+        if len(order_ids) == 0:
+            logger.info(f"[{turn_id}] ⚠️ 没有找到符合订单号格式的数字（≥8位）")
+            return False
+
+        if len(order_ids) > 1:
+            logger.info(f"[{turn_id}] ⚠️ 发现多个疑似订单号 {order_ids}，需要用户明确选择")
+            return False
+
+        order_id = order_ids[0]
+        task.slots["order_id"] = order_id
+        task.missing_slots.remove("order_id")
+        logger.info(f"[{turn_id}] ✅ 成功提取 order_id={order_id}")
+        return True
+
+    return False
+
+
+async def _get_conversation_history(state: AgentState, turn_id: str) -> str:
+    """
+    从数据库获取历史对话
+
+    P1-40修复：参考 ecommerce-customer-service 的实现
+    - 获取当前 session 的历史消息
+    - 格式化为 "USER: xxx\nASSISTANT: xxx" 格式
+    - 限制最近10轮对话
+
+    Args:
+        state: Agent状态
+        turn_id: 轮次ID
+
+    Returns:
+        格式化的历史对话字符串，如果无历史则返回空字符串
+    """
+    try:
+        # 从 config 获取 session_id（LangGraph传入）
+        session_id = state.get("session_id")
+        if not session_id:
+            logger.warning(f"[{turn_id}] ⚠️ 无法获取 session_id，跳过历史对话")
+            return ""
+
+        # 获取数据库会话
+        from customer_service.infrastructure.database import get_db_session
+        from customer_service.models.chat import ChatMessage
+        from sqlalchemy import select
+
+        async with get_db_session() as db_session:
+            # 查询最近20条消息（10轮对话）
+            stmt = (
+                select(ChatMessage)
+                .where(ChatMessage.session_id == session_id)
+                .order_by(ChatMessage.created_at.desc())
+                .limit(20)
+            )
+            result = await db_session.execute(stmt)
+            messages = list(result.scalars().all())
+
+            if not messages:
+                logger.info(f"[{turn_id}] 📜 当前会话无历史消息")
+                return ""
+
+            # 反转顺序（从旧到新）
+            messages.reverse()
+
+            # 转换为字典格式
+            message_dicts = []
+            for msg in messages:
+                message_dicts.append({
+                    "role": msg.role.value if hasattr(msg.role, 'value') else msg.role,
+                    "content": msg.content,
+                })
+
+            # 使用 HistoryBuilder 格式化
+            history = HistoryBuilder.build_from_messages(message_dicts, max_turns=20)
+
+            logger.info(f"[{turn_id}] 📜 成功获取历史对话，共 {len(messages)} 条消息")
+            return history
+
+    except Exception as e:
+        logger.error(f"[{turn_id}] ❌ 获取历史对话失败: {e}", exc_info=True)
+        return ""

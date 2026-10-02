@@ -27,9 +27,12 @@ def build_promotion_query_tool(client: EcommerceClient) -> ToolSpec:
         P1-50 修复：传递 request_id
         """
         # P1-04 修复：使用用户 JWT，让 Commerce 自动获取 member_level
+        # 获取实际的token字符串（而非SecretStr对象）
+        user_token = context.runtime.user_access_token.get_secret_value()
+
         promotions = await client.active_promotions(
             product_id=args.product_id,
-            user_access_token=context.runtime.user_access_token,
+            user_access_token=user_token,
             request_id=context.runtime.request_id,  # P1-50: 传递 request_id
         )
         # P0-14 修复：统一使用 "items" 字段，不再使用 "promotions"

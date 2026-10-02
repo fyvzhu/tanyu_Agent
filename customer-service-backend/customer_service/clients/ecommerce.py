@@ -159,9 +159,50 @@ class EcommerceClient:
         return await self._request("GET", f"/api/v1/catalog/products/{product_id}/size-chart", request_id=request_id)
 
     async def knowledge_card(self, product_id: str, request_id: str | None = None) -> dict[str, Any]:
+        """
+        获取商品知识卡片（用于离线索引和 RAG 检索）
+
+        ⚠️ 重要：此方法返回 ProductKnowledgeCard，不是 ProductCard
+
+        ProductKnowledgeCard vs ProductCard：
+        - KnowledgeCard: 稳定事实信息，用于向量检索，不含实时价格/库存
+        - ProductCard: 实时商品状态，用于前端展示，包含当前价格/库存
+
+        返回字段（来自 ProductKnowledgeCard Schema）：
+        - product_id, brand, product_display_name, category
+        - main_image_url: 静态图片路径（仅供索引，不保证当前可访问）
+        - selling_points, material, features: 稳定的商品描述
+
+        用途：
+        ✅ 离线索引构建（IndexBuilder）
+        ✅ 文本切块和向量化（Chunker）
+
+        禁止用途：
+        ❌ 不要直接展示给前端（应组装 ProductCard）
+        ❌ 不要用于价格/库存判断（数据可能过期）
+        ❌ 不要写入用户专属信息（索引是共享的）
+        """
         return await self._request("GET", f"/internal/v1/products/{product_id}/knowledge-card", internal=True, request_id=request_id)
 
     async def batch_get_products(self, product_ids: list[str], request_id: str | None = None) -> list[dict[str, Any]]:
+        """
+        批量获取商品信息（用于组装 ProductCard）
+
+        ⚠️ 重要：此方法返回实时商品数据（ProductListItem），不是 ProductKnowledgeCard
+
+        返回字段：
+        - product_id, brand, product_display_name, category
+        - main_image_url: 当前可访问的图片地址（非 KnowledgeCard 中的静态路径）
+        - min_price, max_price: 该商品所有 SKU 的当前价格区间（实时查询）
+        - has_stock: 是否有任何 SKU 有库存（实时状态）
+
+        用途：
+        - RAG 检索后，根据 product_ids 回查实时商品状态
+        - 组装 ProductCard 前端展示对象
+
+        禁止用途：
+        ❌ 不要用于离线索引（应使用 knowledge_card()）
+        """
         if not product_ids:
             return []
         data = await self._request(
@@ -233,8 +274,43 @@ class EcommerceClient:
         )
         return data.get("items", [])
 
-    async def filter_skus(self, payload: dict[str, Any], request_id: str | None = None) -> list[dict[str, Any]]:
-        data = await self._request("POST", "/internal/v1/skus/filter", json=payload, internal=True, request_id=request_id)
+    async def filter_skus(
+        self,
+        payload: dict[str, Any],
+        request_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """
+        批量过滤SKU（使用标准化API）
+
+        Args:
+            payload: 过滤参数
+                - product_ids: list[str]
+                - colors: list[str] | None
+                - sizes: list[str] | None
+                - in_stock: bool | None (True=有货, False=缺货, None=全部)
+            request_id: Request-ID
+
+        Returns:
+            SKU列表（使用标准枚举值 in_stock/out_of_stock）
+        """
+        # 使用查询参数而非JSON body
+        params = {
+            "product_ids": payload.get("product_ids", []),
+        }
+        if payload.get("colors"):
+            params["colors"] = payload["colors"]
+        if payload.get("sizes"):
+            params["sizes"] = payload["sizes"]
+        if payload.get("in_stock") is not None:
+            params["in_stock"] = payload["in_stock"]
+
+        data = await self._request(
+            "POST",
+            "/internal/v1/skus/filter",
+            params=params,
+            internal=True,
+            request_id=request_id
+        )
         return data.get("items", [])
 
     async def logistics(self, order_id: str, user_token: str, request_id: str | None = None) -> dict[str, Any]:

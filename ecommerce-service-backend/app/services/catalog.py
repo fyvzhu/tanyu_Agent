@@ -484,7 +484,7 @@ class CatalogService:
             ))
 
         logger.info(f"搜索完成: 总共 {total} 个结果，返回第 {page} 页（{len(items)} 项）")
-        return ProductItems(items=items, total=total)
+        return ProductItems(items=items, total=total, page=page, page_size=page_size)
 
     async def get_product_skus_public(self, product_id: str):
         """
@@ -587,22 +587,31 @@ class CatalogService:
                 if promo.member_level in (member_level, "ALL", None)
             ]
 
-        items = [
-            PromotionPublic(
-                promotion_id=promo.promotion_id,
-                title=promo.promotion_name,
-                promotion_type=PromotionType(promo.promotion_type),
-                description=promo.description,
-                start_at=promo.start_at,
-                end_at=promo.end_at,
-                applicable=True,  # 已过滤，所以都适用
-                discount_rate=promo.discount_rate,
-                discount_amount=promo.discount_amount,
-                threshold_amount=promo.threshold_amount,
-                promo_price=promo.promo_price,
-            )
-            for promo in promotions
-        ]
+        items = []
+        for promo in promotions:
+            try:
+                # 尝试转换枚举值，如果失败则跳过该促销
+                promo_type = PromotionType(promo.promotion_type)
+                items.append(
+                    PromotionPublic(
+                        promotion_id=promo.promotion_id,
+                        title=promo.promotion_name,
+                        promotion_type=promo_type,
+                        description=promo.description,
+                        start_at=promo.start_at,
+                        end_at=promo.end_at,
+                        applicable=True,  # 已过滤，所以都适用
+                        discount_rate=promo.discount_rate,
+                        discount_amount=promo.discount_amount,
+                        threshold_amount=promo.threshold_amount,
+                        promo_price=promo.promo_price,
+                    )
+                )
+            except ValueError as e:
+                logger.warning(
+                    f"跳过未知促销类型: promotion_id={promo.promotion_id}, "
+                    f"promotion_type={promo.promotion_type}, error={e}"
+                )
 
         return PromotionItems(items=items)
 

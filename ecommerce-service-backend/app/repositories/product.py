@@ -114,7 +114,14 @@ class ProductRepository(BaseRepository[Product]):
             query = query.where(Product.brand == brand)
 
         if category:
-            query = query.where(Product.master_category == category)
+            # 支持三层分类搜索：type、sub_category、master_category
+            query = query.where(
+                or_(
+                    Product.type == category,
+                    Product.sub_category == category,
+                    Product.master_category == category,
+                )
+            )
 
         # 按 product_id 排序（确保分页稳定）
         query = query.order_by(Product.product_id)

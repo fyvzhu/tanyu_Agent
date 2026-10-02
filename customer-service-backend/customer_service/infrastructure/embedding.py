@@ -25,22 +25,24 @@ class Embedder(Protocol):
 
 class EmbeddingClient:
     """
-    TEI (Text Embeddings Inference) 客户端
-    
-    支持的 API 格式：
-    - POST /embed: {"inputs": str} -> [[float, ...]]
-    - POST /embed: {"inputs": [str, ...]} -> [[float, ...], ...]
+    BGE-M3 Embedding 客户端（统一 Docker 服务契约）
+
+    API 格式（与 Docker embedding 服务一致）：
+    - POST /embed: {"inputs": str} -> {"embeddings": [[float, ...]]}
+    - POST /embed: {"inputs": [str, ...]} -> {"embeddings": [[float, ...], ...]}
+
+    问题 #9 修复：统一使用 Docker 服务的 /embed 端点
     """
-    
+
     def __init__(
         self,
-        base_url: str = "http://localhost:8080",
+        base_url: str = "http://localhost:8100",
         http_client: httpx.AsyncClient | None = None,
         timeout: float = 30.0,
     ):
         """
         Args:
-            base_url: TEI 服务地址
+            base_url: Embedding 服务地址（默认 Docker 服务端口 8100）
             http_client: 复用的 HTTP 客户端（可选）
             timeout: 请求超时时间（秒）
         """
@@ -56,28 +58,27 @@ class EmbeddingClient:
     async def embed(self, text: str) -> list[float]:
         """
         单条文本 embedding
-        
+
         Args:
             text: 输入文本
-            
+
         Returns:
             embedding 向量
-            
+
         Raises:
             httpx.HTTPError: 请求失败
             ValueError: 响应格式错误
         """
         try:
             response = await self.http_client.post(
-                f"{self.base_url}/embeddings",
-                json={"text": text}
+                f"{self.base_url}/embed",
+                json={"inputs": text}
             )
             response.raise_for_status()
 
-            # 解析响应
+            # 解析响应 {"embeddings": [[float, ...]]}
             data = response.json()
 
-            # BGE-M3 service returns {"embeddings": [[float, ...]], ...} for single text
             embeddings = data.get("embeddings")
 
             if not isinstance(embeddings, list):
@@ -93,7 +94,7 @@ class EmbeddingClient:
 
             logger.debug(f"✓ Embedded text (length={len(text)}) -> vector dim={len(embedding)}")
             return embedding
-            
+
         except httpx.HTTPError as e:
             logger.error(f"❌ Embedding request failed: {e}")
             raise
@@ -105,7 +106,7 @@ class EmbeddingClient:
         """
         批量文本 embedding
 
-        P0-38 修复：统一使用 {"embeddings": [...]} 响应格式
+        问题 #9 修复：统一使用 Docker 服务的 /embed + {"inputs": [...]} 格式
 
         Args:
             texts: 输入文本列表
@@ -122,12 +123,12 @@ class EmbeddingClient:
 
         try:
             response = await self.http_client.post(
-                f"{self.base_url}/embeddings",
-                json={"text": texts}
+                f"{self.base_url}/embed",
+                json={"inputs": texts}
             )
             response.raise_for_status()
 
-            # P0-38: 解析 {"embeddings": [[float, ...], ...]} 格式
+            # 解析 {"embeddings": [[float, ...], ...]} 格式
             data = response.json()
 
             embeddings = data.get("embeddings")
