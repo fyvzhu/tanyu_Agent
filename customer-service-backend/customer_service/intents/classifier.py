@@ -115,13 +115,14 @@ class IntentClassifier:
         if use_llm and _llm_classifier_available:
             self.llm_classifier = StructuredLLMClassifier(enabled=True)
 
-    def classify(self, message: str, history: str | None = None) -> IntentResult:
+    def classify(self, message: str, history: str | None = None, active_intent: BusinessIntent | None = None) -> IntentResult:
         """
         识别用户意图
 
         Args:
             message: 当前用户消息
             history: 历史对话上下文（可选，用于LLM分类器）
+            active_intent: 当前活跃的意图（用于意图继承）
 
         Returns:
             IntentResult: 意图识别结果
@@ -129,6 +130,22 @@ class IntentClassifier:
         text = message.strip()
         entities = extract_entities(text)
         scores: dict[str, float] = {}
+
+        # P2修复（参考修改建议2第十节）：检测省略式追问
+        # "那29570呢？" / "15970呢？" / "这个呢？" 等应该继承上一轮意图
+        if active_intent and _is_elliptical_followup(text):
+            from loguru import logger
+            logger.info(f"[IntentClassifier] 检测到省略式追问，继承意图: {active_intent.value}")
+
+            # 继承上一轮意图，但降低置信度（因为可能用户想换话题）
+            return IntentResult(
+                recognized=True,
+                intent=active_intent,
+                decision=IntentDecision.ACCEPT,
+                confidence=0.75,  # 继承意图的置信度略低
+                entities=entities,
+                inherited=True,  # 标记为继承的意图
+            )
 
         # P1-40修复：如果启用了LLM分类器且提供了历史对话，优先使用LLM
         # 这可以更好地理解上下文，例如"那29570呢？"需要结合历史理解
@@ -499,3 +516,74 @@ async def classify_with_llm(
     # 返回关键词分类结果（作为fallback）
     return keyword_classification
 
+
+def _is_elliptical_followup(text: str) -> bool:
+    """
+    检测是否是省略式追问
+
+    P2修复（参考修改建议2第十节）：
+    省略式追问特征：
+    1. 消息很短（通常<15字符）
+    2. 包含"那"、"这"等指示词或纯数字
+    3. 包含"呢"、"吗"、"怎么样"等疑问表达
+    4. 不包含完整问句标志（"怎么选"、"如何"、"什么时候"等）
+
+    Examples:
+        - "那29570呢？"
+        - "15970呢？"
+        - "这个呢？"
+        - "那个有促销吗？"
+        - "那个怎么样？"
+
+    反例：
+        - "这款商品的尺码怎么选？" -> 完整问句，不是省略式
+        - "29570有促销吗" -> 没有指示词，是完整表达
+
+    Args:
+        text: 用户消息
+
+    Returns:
+        是否是省略式追问
+    """
+    text = text.strip()
+
+    # 特征1：消息很短（省略式追问通常简短）
+    if len(text) > 15:
+        return False
+
+    # 排除完整问句标志（如果包含这些动词，说明是完整表达）
+    # "怎么样"是例外，它是省略式的典型表达
+    complete_question_markers = ["怎么选", "怎么买", "怎么用", "如何", "为什么", "什么时候", "哪里", "哪个", "多少钱"]
+    if any(marker in text for marker in complete_question_markers):
+        return False
+
+    # 疑问词（包含"怎么样"这种省略式表达）
+    question_markers = ["呢", "吗", "么", "怎么样"]
+    has_question = any(q in text for q in question_markers)
+    if not has_question:
+        return False
+
+    # 特征2：包含指示词
+    elliptical_markers = ["那", "这", "这个", "那个", "它", "他"]
+    has_marker = any(marker in text for marker in elliptical_markers)
+
+    # 特征3：包含数字（商品ID）
+    has_number = any(char.isdigit() for char in text)
+
+    # 规则1：指示词 + 疑问词
+    if has_marker and has_question:
+        # 排除"这款"、"那款"等完整表达
+        if "款" in text or "种" in text or "类" in text:
+            return False
+        return True
+
+    # 规则2：纯数字 + 疑问词（如"15970呢？"）
+    if has_number and has_question and not has_marker:
+        # 检查是否主要是数字组成
+        text_alphanumeric = ''.join(c for c in text if c.isalnum())
+        if text_alphanumeric:
+            digit_ratio = sum(1 for c in text_alphanumeric if c.isdigit()) / len(text_alphanumeric)
+            if digit_ratio >= 0.5:
+                return True
+
+    return False

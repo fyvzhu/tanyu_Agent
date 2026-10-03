@@ -13,6 +13,11 @@ export const useChatStore = defineStore('chat', () => {
   const loading = ref(false)
   const total = ref(0)
 
+  // P1修复：区分loading/error/truly-empty（参考修改建议1第三节）
+  const sessionsLoading = ref(false)  // 会话列表加载中
+  const sessionsLoaded = ref(false)   // 会话列表已加载（成功或失败）
+  const sessionsLoadError = ref(null) // 会话列表加载错误信息
+
   // 计算属性
   const currentSession = computed(() => {
     return sessions.value.find(s => s.session_id === currentSessionId.value)
@@ -38,25 +43,39 @@ export const useChatStore = defineStore('chat', () => {
 
   // 加载会话列表
   async function loadSessions(page = 1, pageSize = 20) {
+    // P1修复：设置加载状态
+    sessionsLoading.value = true
+    sessionsLoadError.value = null
+
     try {
       loading.value = true
       const res = await getSessionList({ page, page_size: pageSize })
-      if (res.success && res.data) {
-        sessions.value = res.data.items
-        total.value = res.data.total
 
-        // 修复问题2：如果没有当前会话且列表不为空，自动选择第一个
-        if (!currentSessionId.value && sessions.value.length > 0) {
-          const firstSessionId = sessions.value[0].session_id
-          console.log(`[ChatStore] 自动选择第一个会话: ${firstSessionId}`)
-          await switchSession(firstSessionId)
-        }
+      // P1修复：验证响应格式
+      if (!res?.success || !res?.data) {
+        throw new Error('会话列表响应格式错误')
+      }
+
+      sessions.value = res.data.items || []
+      total.value = res.data.total || 0
+
+      // P1修复：标记加载成功
+      sessionsLoaded.value = true
+
+      // 修复问题2：如果没有当前会话且列表不为空，自动选择第一个
+      if (!currentSessionId.value && sessions.value.length > 0) {
+        const firstSessionId = sessions.value[0].session_id
+        console.log(`[ChatStore] 自动选择第一个会话: ${firstSessionId}`)
+        await switchSession(firstSessionId)
       }
     } catch (error) {
+      // P1修复：记录错误信息
+      sessionsLoadError.value = error?.message || '加载会话失败'
       console.error('加载会话列表失败:', error)
       throw error
     } finally {
       loading.value = false
+      sessionsLoading.value = false
     }
   }
 
@@ -187,6 +206,10 @@ export const useChatStore = defineStore('chat', () => {
     currentMessages, // 导出 computed，替代旧的 messages
     loading,
     total,
+    // P1修复：导出加载状态（参考修改建议1第三节）
+    sessionsLoading,
+    sessionsLoaded,
+    sessionsLoadError,
     loadSessions,
     createSession,
     switchSession,

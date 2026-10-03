@@ -33,6 +33,7 @@ from customer_service.schemas.foundation import (
     PendingConfirmation,
     SessionUserContext,
 )
+from customer_service.graph.dialogue_frame import DialogueFrame  # P2修复：导入DialogueFrame
 
 
 # ==================== TaskTransition（Graph 专用）====================
@@ -130,6 +131,7 @@ class AgentState(TypedDict, total=False):
     session_user_context: SessionUserContext
     conversation_focus: FocusRef | None
     pending_intent_selection: PendingIntentSelection | None
+    dialogue_frame: DialogueFrame  # P2修复：对话语义上下文帧，用于意图继承和指代消解
 
     # ===== Transient（v7 规范 - 每 Turn 重置）=====
     current_message: str

@@ -23,6 +23,50 @@ from customer_service.graph.state import (
 from customer_service.intents.models import BusinessIntent
 
 
+def _ensure_dialogue_frame(state: AgentState):
+    """
+    确保dialogue_frame是DialogueFrame对象而非dict
+
+    处理从Redis恢复的LangChain序列化格式（包括嵌套的FocusRef）
+    """
+    from customer_service.graph.dialogue_frame import DialogueFrame, FocusRef
+
+    dialogue_frame = state.get("dialogue_frame")
+    if not dialogue_frame:
+        return None
+
+    if isinstance(dialogue_frame, DialogueFrame):
+        return dialogue_frame
+
+    # 处理dict格式
+    if isinstance(dialogue_frame, dict):
+        # 检查是否是LangChain序列化格式
+        if 'lc' in dialogue_frame and 'kwargs' in dialogue_frame:
+            kwargs = dialogue_frame['kwargs']
+        else:
+            kwargs = dialogue_frame
+
+        # 处理嵌套的last_focus（也可能是序列化的dict）
+        if 'last_focus' in kwargs and isinstance(kwargs['last_focus'], dict):
+            focus_dict = kwargs['last_focus']
+            # 检查是否是LangChain序列化格式
+            if 'lc' in focus_dict and 'kwargs' in focus_dict:
+                kwargs['last_focus'] = FocusRef(**focus_dict['kwargs'])
+            elif 'entity_type' in focus_dict and 'entity_id' in focus_dict:
+                kwargs['last_focus'] = FocusRef(**focus_dict)
+            else:
+                # 无效的focus数据，设为None
+                kwargs['last_focus'] = None
+
+        dialogue_frame = DialogueFrame(**kwargs)
+
+        # 更新state中的对象
+        state["dialogue_frame"] = dialogue_frame
+        return dialogue_frame
+
+    return None
+
+
 class TaskContextManager:
     """
     Task Stack 纯确定性管理器
@@ -174,7 +218,17 @@ class TaskContextManager:
         
         # 保存快照
         state["completed_task_snapshot"] = active_task
-        
+
+        # P2修复：更新DialogueFrame，保存刚完成任务的语义信息
+        # 这样下一轮省略式追问可以继承这些信息
+        dialogue_frame = _ensure_dialogue_frame(state)
+        if dialogue_frame:
+            dialogue_frame.update_from_task(active_task, turn_id)
+            dialogue_frame.last_completed_task_id = active_task.task_id
+            logger.info(
+                f"📝 [TaskMgr] 更新DialogueFrame: {dialogue_frame.get_context_summary()}"
+            )
+
         logger.info(
             f"✅ [TaskMgr] 完成任务: task_id={active_task.task_id}, "
             f"intent={active_task.intent}"

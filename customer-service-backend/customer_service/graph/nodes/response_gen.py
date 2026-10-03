@@ -28,7 +28,8 @@ from loguru import logger
 from langgraph.types import RunnableConfig
 
 from customer_service.graph.state import AgentState, TaskStatus
-from customer_service.intents.models import BusinessIntent
+from customer_service.tasking.models import TaskFrame, BusinessIntent  # P0修复：导入TaskFrame
+from customer_service.intents.models import TurnAction, BusinessIntent as IntentBusinessIntent
 from customer_service.flows.models import FlowResult, FlowStatus
 from customer_service.infrastructure.llm import get_llm
 from customer_service.prompts import render_prompt
@@ -54,6 +55,12 @@ async def response_gen_node(state: AgentState, config: RunnableConfig) -> AgentS
 
     logger.info(f"[{turn_id}] === 节点 4: Response Gen 开始 ===")
 
+    # P0修复：优先处理TurnAction，不能让Task状态覆盖本轮动作
+    # 参考修改建议1第七、八节
+
+    turn_action = state.get("turn_action")
+    intent_result = state.get("intent_result")
+
     # 问题4修复: 优先处理 pending_intent_selection 的展示
     pending_selection = state.get("pending_intent_selection")
     if pending_selection:
@@ -76,20 +83,56 @@ async def response_gen_node(state: AgentState, config: RunnableConfig) -> AgentS
         logger.info(f"[{turn_id}] === 节点 4: Response Gen 完成（任务恢复）===")
         return state
 
-    # 问题4修复: 检查是否是取消操作
-    if not active_task:
-        # 如果是刚取消的任务，生成取消确认
-        if task_transition and task_transition.action == "cancel":
-            response_draft = "好的，已为您取消当前操作。还有什么我可以帮您的吗？"
-            state["response_draft"] = response_draft
-            logger.info(f"[{turn_id}] ✅ 生成取消确认")
-            return state
+    # P0修复：CANCEL动作优先处理
+    if turn_action == TurnAction.CANCEL:
+        response_draft = "好的，已为您取消当前操作。还有什么我可以帮您的吗？"
+        state["response_draft"] = response_draft
+        logger.info(f"[{turn_id}] ✅ 生成取消确认")
+        return state
 
-        # 其他没有任务的情况，fallback
-        response_draft = "抱歉，我不太理解您的意思。您可以问我商品信息、促销活动或者订单相关的问题哦～"
+    # P0修复：CLARIFY/UNSUPPORTED/OUT_OF_SCOPE等必须先于active_task检查
+    if turn_action in {
+        TurnAction.CLARIFY,
+        TurnAction.UNSUPPORTED,
+        TurnAction.CLASSIFIER_FAILURE,
+        TurnAction.OUT_OF_SCOPE,
+    }:
+        # 生成澄清或超出范围的响应
+        if turn_action == TurnAction.OUT_OF_SCOPE:
+            response_draft = "抱歉，这个问题超出了我的服务范围。我主要可以帮您查询商品信息、促销活动、订单物流等～"
+        elif turn_action == TurnAction.UNSUPPORTED:
+            response_draft = "抱歉，该功能暂未开放。您可以先尝试其他功能～"
+        elif turn_action == TurnAction.CLASSIFIER_FAILURE:
+            response_draft = "抱歉，我暂时无法理解您的需求。请换个方式描述，或者告诉我您想查询什么～"
+        else:  # CLARIFY
+            response_draft = "抱歉，我不太理解您的意思。您可以问我商品信息、促销活动或者订单相关的问题哦～"
+
         state["response_draft"] = response_draft
         state["fallback_used"] = True
-        logger.warning(f"[{turn_id}] ⚠️ 没有 active_task，使用 fallback")
+        logger.info(f"[{turn_id}] ❓ 生成澄清响应: turn_action={turn_action.value}")
+        return state
+
+    # P0修复：CHITCHAT必须先于active_task检查
+    # 因为CHITCHAT按设计不创建active_task，如果先检查active_task就会误判为异常
+    if (
+        turn_action == TurnAction.CHITCHAT
+        or (intent_result and intent_result.intent == BusinessIntent.CHITCHAT)
+    ):
+        response_draft = _generate_chitchat_response(current_message)
+        state["response_draft"] = response_draft
+        logger.info(f"[{turn_id}] 💬 生成闲聊响应")
+        return state
+
+    # 到这里才检查active_task，因为前面的动作都不需要active_task
+    active_task = state.get("active_task")
+
+    if not active_task:
+        # 走到这里说明既不是CHITCHAT/CLARIFY/CANCEL，也没有active_task
+        # 这是真正的异常情况
+        response_draft = "抱歉，当前请求处理出现问题。请重新描述您的需求～"
+        state["response_draft"] = response_draft
+        state["fallback_used"] = True
+        logger.warning(f"[{turn_id}] ⚠️ 没有 active_task 且不是特殊动作，使用 fallback")
         return state
 
     # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式

@@ -24,6 +24,18 @@ logger.add(
     colorize=True,
 )
 
+# 添加文件日志，记录所有错误
+logger.add(
+    "logs/error_{time:YYYY-MM-DD}.log",
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+    level="ERROR",
+    rotation="00:00",  # 每天轮转
+    retention="7 days",  # 保留7天
+    encoding="utf-8",
+    backtrace=True,  # 显示完整堆栈
+    diagnose=True,   # 显示变量值
+)
+
 
 def _error_code(status_code: int) -> str:
     return {
@@ -106,6 +118,31 @@ async def validation_exception_handler(request, exc: RequestValidationError):
                 "message": "request validation failed",
                 "safe_message": "请求参数不正确",
                 "details": {"errors": exc.errors()},
+            },
+            "request_id": request_id,
+        },
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc: Exception):
+    """捕获所有未处理的异常并记录到日志"""
+    import traceback
+
+    request_id = getattr(request.state, "request_id", None)
+    error_detail = traceback.format_exc()
+
+    # 记录完整错误到日志文件
+    logger.error(f"未处理的异常 [request_id={request_id}]:\n{error_detail}")
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": str(exc),
+                "safe_message": "服务器内部错误，请稍后重试",
+                "details": {},
             },
             "request_id": request_id,
         },

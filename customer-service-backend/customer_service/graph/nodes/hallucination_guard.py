@@ -238,12 +238,32 @@ async def hallucination_guard_node(state: AgentState, config: RunnableConfig) ->
 
     logger.info(f"[{turn_id}] === 节点 5: Hallucination Guard 开始 ===")
 
+    # P0修复：提前return的分支必须设置guard_status
+    # 参考修改建议1第五、六节
+
     if not response_draft:
-        logger.warning(f"[{turn_id}] ⚠️ 没有 response_draft，跳过检查")
+        logger.error(f"[{turn_id}] ❌ response_draft 缺失，这是内部异常")
+
+        state["response_draft"] = "抱歉，当前请求处理出现异常，请稍后重试～"
+        state["fallback_used"] = True
+        state["hallucination_detected"] = False
+        state["hallucination_score"] = 0.0
+        state["guard_status"] = GuardStatus.FALLBACK
+
         return state
 
     if not active_task:
-        logger.warning(f"[{turn_id}] ⚠️ 没有 active_task，跳过检查")
+        # P0修复：无active_task表示这是CHITCHAT/CLARIFY/CANCEL等非业务事实响应
+        # 这些响应没有需要验证的业务数据，直接PASS
+        logger.info(
+            f"[{turn_id}] ℹ️ 无 active_task，"
+            "视为非业务事实响应（CHITCHAT/CLARIFY/CANCEL等），Guard 直接通过"
+        )
+
+        state["hallucination_detected"] = False
+        state["hallucination_score"] = 0.0
+        state["guard_status"] = GuardStatus.PASS
+
         return state
 
     # P0 修复: 处理从 Redis 恢复的 LangChain 序列化格式

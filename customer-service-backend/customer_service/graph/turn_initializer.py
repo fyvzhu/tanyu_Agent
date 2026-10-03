@@ -18,6 +18,7 @@ from loguru import logger
 
 from customer_service.graph.state import AgentState
 from customer_service.schemas.foundation import SessionUserContext
+from customer_service.graph.dialogue_frame import DialogueFrame  # P2修复：导入DialogueFrame
 
 
 class TurnInitializer:
@@ -86,20 +87,25 @@ class TurnInitializer:
         if "session_user_context" not in state:
             state["session_user_context"] = SessionUserContext()
             logger.debug("📝 [TurnInit] 初始化 session_user_context")
-        
+
         if "paused_tasks" not in state:
             state["paused_tasks"] = []
             logger.debug("📝 [TurnInit] 初始化 paused_tasks")
-        
+
         if "active_task" not in state:
             state["active_task"] = None
             logger.debug("📝 [TurnInit] 初始化 active_task")
-        
+
         if "conversation_focus" not in state:
             state["conversation_focus"] = None
-        
+
         if "pending_intent_selection" not in state:
             state["pending_intent_selection"] = None
+
+        # P2修复：初始化 dialogue_frame
+        if "dialogue_frame" not in state:
+            state["dialogue_frame"] = DialogueFrame()
+            logger.debug("📝 [TurnInit] 初始化 dialogue_frame")
         
         logger.info(
             f"✅ [TurnInit] Turn 初始化完成: turn_id={turn_id}, "
@@ -113,7 +119,7 @@ class TurnInitializer:
     def get_persistent_fields() -> list[str]:
         """
         返回所有 Persistent 字段名称
-        
+
         用于 Checkpointer 选择性持久化
         """
         return [
@@ -122,6 +128,7 @@ class TurnInitializer:
             "session_user_context",
             "conversation_focus",
             "pending_intent_selection",
+            "dialogue_frame",  # P2修复：添加dialogue_frame到持久化字段
         ]
     
     @staticmethod

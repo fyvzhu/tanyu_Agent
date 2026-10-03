@@ -40,6 +40,7 @@ from customer_service.graph.state import (
     ActionMode,
 )
 from customer_service.graph.task_context_manager import TaskContextManager
+from customer_service.graph.context_resolver import ContextResolver, ContextResolution  # P2修复：导入Context Resolver
 from customer_service.intents.models import (
     BusinessIntent,
     IntentFallbackReason,
@@ -237,15 +238,99 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
                 logger.info(f"[{turn_id}] ⚠️ 无法解析为槽位回答，走正常分类流程")
                 # 继续走正常分类流程
 
+    # ===== P1修复：优先检测历史查询（参考修改建议1第十一节）=====
+    # "我刚问了什么？"这类query是对话元查询，不需要走业务Intent分类
+    if _is_history_query(current_message):
+        logger.info(f"[{turn_id}] 📜 检测到历史查询，直接响应")
+
+        # 获取历史对话
+        history_str = await _get_conversation_history(state, config, turn_id)
+
+        if history_str:
+            # 提取最近一条用户消息
+            last_user_message = _extract_last_user_message(history_str)
+            if last_user_message:
+                response = f"你刚才问的是：「{last_user_message}」"
+            else:
+                response = "这是我们对话的开始，您还没有问过其他问题～"
+        else:
+            response = "这是我们对话的开始，您还没有问过其他问题～"
+
+        # 直接设置响应，不走Intent分类
+        state["turn_action"] = TurnAction.CHITCHAT  # 历史查询视为类似闲聊的元对话
+        state["intent_result"] = IntentResult(
+            recognized=False,  # 不是业务Intent
+            intent=None,
+            decision=IntentDecision.ACCEPT,
+            confidence=1.0,
+            entities={}
+        )
+        state["response_draft"] = response
+
+        logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（历史查询）===")
+        return state
+
     # ===== 阶段1重构：三层架构（分类器→验证器→决策）=====
     # P1-40修复：从数据库获取历史对话，传递给分类器增强上下文理解
+    # P0修复：必须传入config参数以获取runtime.session_id
+    # P2修复：传入active_intent支持意图继承
+    # P2修复（修改建议2第十节）：先调用Context Resolver解析上下文
 
     # 获取历史对话
-    history_str = await _get_conversation_history(state, turn_id)
+    history_str = await _get_conversation_history(state, config, turn_id)
 
-    # 第1层：分类器 - 提出候选目标（传入历史对话）
+    # ===== P2修复：Context Resolver（规则优先）=====
+    # 在意图分类之前，先解析上下文（省略式追问、指代消解、补槽等）
+    from customer_service.graph.task_context_manager import _ensure_dialogue_frame
+
+    dialogue_frame = _ensure_dialogue_frame(state)
+    active_task = state.get("active_task")
+
+    resolver = ContextResolver()
+    context_resolution = resolver.resolve(
+        current_message=current_message,
+        dialogue_frame=dialogue_frame,
+        active_task=active_task,
+        turn_id=turn_id,
+    )
+
+    logger.info(
+        f"[{turn_id}] 📍 Context解析: mode={context_resolution.mode}, "
+        f"inherited_intent={context_resolution.inherited_intent.value if context_resolution.inherited_intent else 'None'}, "
+        f"confidence={context_resolution.confidence:.2f}"
+    )
+    if context_resolution.reasoning:
+        logger.info(f"[{turn_id}] 💡 推理: {context_resolution.reasoning}")
+
+    # 获取当前活跃意图（用于意图继承）
+    # 优先使用Context Resolver解析的inherited_intent
+    active_intent = context_resolution.inherited_intent or (active_task.intent if active_task else None)
+
+    logger.info(f"[{turn_id}] 当前活跃意图: {active_intent.value if active_intent else '无'}")
+
+    # 第1层：分类器 - 提出候选目标（传入历史对话和活跃意图）
     classifier = IntentClassifier()
-    old_result = classifier.classify(current_message, history=history_str)
+    old_result = classifier.classify(current_message, history=history_str, active_intent=active_intent)
+
+    # P2修复：如果是意图继承（inherited=True），从消息中提取新的商品ID
+    # "那29570呢？" 应该继承意图，但更新商品ID到29570
+    # 同时合并Context Resolver提取的实体
+    if old_result.inherited and old_result.entities:
+        from customer_service.intents.entity_extractor import extract_entities
+        # 重新提取实体，确保获取最新的商品ID
+        fresh_entities = extract_entities(current_message)
+        if fresh_entities.get("product_id"):
+            old_result.entities["product_id"] = fresh_entities["product_id"]
+            logger.info(
+                f"[{turn_id}] 🔄 意图继承，更新商品ID: {fresh_entities['product_id']}"
+            )
+
+    # 合并Context Resolver提取的实体更新
+    if context_resolution.entity_updates:
+        old_result.entities.update(context_resolution.entity_updates)
+        logger.info(
+            f"[{turn_id}] 🔄 合并Context实体: {context_resolution.entity_updates}"
+        )
 
     # 第2层：适配器 - 转换为新格式
     classification: IntentClassificationResult = adapt_intent_result_to_classification(
@@ -636,27 +721,41 @@ def _try_fill_missing_slots(
     return False
 
 
-async def _get_conversation_history(state: AgentState, turn_id: str) -> str:
+async def _get_conversation_history(
+    state: AgentState,
+    config: RunnableConfig,
+    turn_id: str,
+) -> str:
     """
     从数据库获取历史对话
 
-    P1-40修复：参考 ecommerce-customer-service 的实现
-    - 获取当前 session 的历史消息
-    - 格式化为 "USER: xxx\nASSISTANT: xxx" 格式
-    - 限制最近10轮对话
+    P0修复（参考修改建议1第九、十节）：
+    1. 从 config.runtime.session_id 获取session_id（而非state）
+    2. 排除当前turn_id的消息（避免"我刚问了什么"包含自己）
+    3. 限制最近20条消息（10轮对话）
 
     Args:
         state: Agent状态
-        turn_id: 轮次ID
+        config: LangGraph配置（包含runtime context）
+        turn_id: 当前轮次ID
 
     Returns:
         格式化的历史对话字符串，如果无历史则返回空字符串
     """
     try:
-        # 从 config 获取 session_id（LangGraph传入）
-        session_id = state.get("session_id")
+        # P0修复：从config.runtime获取session_id和user_id
+        configurable = config.get("configurable", {})
+        runtime = configurable.get("runtime")
+
+        if not runtime:
+            logger.warning(f"[{turn_id}] ⚠️ runtime 缺失，跳过历史对话")
+            return ""
+
+        session_id = runtime.session_id
+        user_id = runtime.principal.user_id
+
         if not session_id:
-            logger.warning(f"[{turn_id}] ⚠️ 无法获取 session_id，跳过历史对话")
+            logger.warning(f"[{turn_id}] ⚠️ session_id 缺失，跳过历史对话")
             return ""
 
         # 获取数据库会话
@@ -665,10 +764,14 @@ async def _get_conversation_history(state: AgentState, turn_id: str) -> str:
         from sqlalchemy import select
 
         async with get_db_session() as db_session:
-            # 查询最近20条消息（10轮对话）
+            # P0修复：排除当前turn_id，避免"我刚问了什么"包含自己
             stmt = (
                 select(ChatMessage)
-                .where(ChatMessage.session_id == session_id)
+                .where(
+                    ChatMessage.session_id == session_id,
+                    ChatMessage.user_id == user_id,
+                    ChatMessage.turn_id != turn_id,  # 关键：排除当前turn
+                )
                 .order_by(ChatMessage.created_at.desc())
                 .limit(20)
             )
@@ -699,3 +802,62 @@ async def _get_conversation_history(state: AgentState, turn_id: str) -> str:
     except Exception as e:
         logger.error(f"[{turn_id}] ❌ 获取历史对话失败: {e}", exc_info=True)
         return ""
+
+
+def _is_history_query(message: str) -> bool:
+    """
+    检测是否是历史查询（对话元查询）
+
+    P1修复（参考修改建议1第十一节）：
+    这类query询问的是对话本身，而非业务需求
+    例如："我刚问了什么？"、"上一句我说了什么？"
+
+    Args:
+        message: 用户消息
+
+    Returns:
+        是否是历史查询
+    """
+    patterns = [
+        "我刚问了什么",
+        "我刚才问了什么",
+        "我刚说了什么",
+        "我刚才说了什么",
+        "上一句我说了什么",
+        "上一句我问了什么",
+        "刚才我问的什么",
+        "刚才我说的什么",
+        "之前我问了什么",
+        "之前我说了什么",
+        "我问过什么",
+        "刚才问了啥",
+        "刚问了啥",
+    ]
+
+    message_lower = message.lower()
+    return any(pattern in message_lower for pattern in patterns)
+
+
+def _extract_last_user_message(history: str) -> str | None:
+    """
+    从历史对话中提取最近一条用户消息
+
+    Args:
+        history: 格式化的历史对话字符串（"USER: xxx\nASSISTANT: xxx"）
+
+    Returns:
+        最近一条用户消息内容，如果没有则返回None
+    """
+    if not history:
+        return None
+
+    lines = history.strip().split('\n')
+
+    # 从后往前找最近的USER消息
+    for line in reversed(lines):
+        if line.startswith('USER:'):
+            # 提取USER:后面的内容
+            content = line[5:].strip()
+            return content
+
+    return None

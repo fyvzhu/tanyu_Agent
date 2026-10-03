@@ -119,10 +119,11 @@ class IntentResult(BaseModel):
     second_confidence: float | None = Field(None, description="第二候选置信度")
     margin: float | None = Field(None, description="置信度差值")
     candidate_intents: list[BusinessIntent] = Field(
-        default_factory=list, 
+        default_factory=list,
         description="候选 Intent 列表（用于澄清）"
     )
     entities: dict[str, Any] = Field(default_factory=dict, description="提取的实体")
+    inherited: bool = Field(False, description="是否从上一轮继承的意图（P2修复）")
 
 
 class IntentPolicy(BaseModel):

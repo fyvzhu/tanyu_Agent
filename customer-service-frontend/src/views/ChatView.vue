@@ -40,7 +40,18 @@
             🗑️
           </button>
         </div>
-        <div v-if="chatStore.sessions.length === 0" class="empty-sessions">
+
+        <!-- P1修复：区分loading/error/truly-empty（参考修改建议1第三节） -->
+        <div v-if="chatStore.sessionsLoading" class="empty-sessions">
+          正在加载会话...
+        </div>
+
+        <div v-else-if="chatStore.sessionsLoadError" class="empty-sessions error">
+          会话加载失败，请重试
+          <button @click="reloadSessions" class="btn-retry">重新加载</button>
+        </div>
+
+        <div v-else-if="chatStore.sessions.length === 0" class="empty-sessions">
           暂无会话
         </div>
       </div>
@@ -210,6 +221,15 @@ const errorMessage = ref('')
 // 使用 store 的 currentMessages 作为唯一数据源
 const messages = computed(() => chatStore.currentMessages)
 const messagesContainer = ref(null)
+
+// P1修复：重新加载会话列表
+const reloadSessions = async () => {
+  try {
+    await chatStore.loadSessions()
+  } catch (error) {
+    console.error('重新加载会话失败:', error)
+  }
+}
 
 const orders = ref([])
 const expandedOrders = ref([]) // 展开的订单ID列表

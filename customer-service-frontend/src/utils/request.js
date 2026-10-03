@@ -7,6 +7,9 @@ const request = axios.create({
   timeout: 30000,
 })
 
+// P0修复：单例模式的Token刷新Promise，避免并发请求重复刷新
+let refreshPromise = null
+
 // 请求拦截器
 request.interceptors.request.use(
   (config) => {
@@ -30,33 +33,54 @@ request.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config
 
-    // 401 错误且未重试过，尝试刷新 token
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      originalRequest._retry = true
-
-      try {
-        // 调用刷新接口
-        const { data } = await axios.post('/commerce/api/v1/auth/refresh', {}, {
-          withCredentials: true, // 携带 HttpOnly Cookie
-        })
-
-        if (data.success && data.data) {
-          // 更新 access token
-          setAccessToken(data.data.access_token)
-
-          // 重试原请求
-          originalRequest.headers.Authorization = `Bearer ${data.data.access_token}`
-          return axios(originalRequest)
-        }
-      } catch (refreshError) {
-        // 刷新失败，清除 token 并跳转登录
-        removeAccessToken()
-        window.location.href = '/login'
-        return Promise.reject(refreshError)
-      }
+    // 不是401或已经重试过，直接拒绝
+    if (
+      error.response?.status !== 401 ||
+      !originalRequest ||
+      originalRequest._retry
+    ) {
+      return Promise.reject(error)
     }
 
-    return Promise.reject(error)
+    originalRequest._retry = true
+
+    try {
+      // P0修复：单例刷新，避免并发请求重复刷新Token
+      if (!refreshPromise) {
+        refreshPromise = axios
+          .post('/commerce/api/v1/auth/refresh', {}, {
+            withCredentials: true, // 携带 HttpOnly Cookie
+          })
+          .then(({ data }) => {
+            if (!data.success || !data.data?.access_token) {
+              throw new Error('Refresh token failed')
+            }
+
+            const token = data.data.access_token
+            setAccessToken(token)
+            return token
+          })
+          .finally(() => {
+            refreshPromise = null
+          })
+      }
+
+      const newToken = await refreshPromise
+
+      originalRequest.headers.Authorization = `Bearer ${newToken}`
+
+      // P0修复关键：必须重新走request实例，保证返回契约一致
+      // 原来 return axios(originalRequest) 会导致返回AxiosResponse完整对象
+      // 现在 return request(originalRequest) 会再次走response interceptor返回response.data
+      // 这样无论首次200还是401->refresh->retry->200，调用方拿到的都是 {success, data} 结构
+      return request(originalRequest)
+
+    } catch (refreshError) {
+      // 刷新失败，清除 token 并跳转登录
+      removeAccessToken()
+      window.location.href = '/login'
+      return Promise.reject(refreshError)
+    }
   }
 )
 
