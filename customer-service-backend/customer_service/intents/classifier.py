@@ -1,14 +1,31 @@
 from __future__ import annotations
 
-from customer_service.intents.entity_extractor import extract_entities
+from customer_service.intents.entity_extractor import extract_entities, extract_entities_with_candidates
 from customer_service.intents.models import (
     IntentResult,
     IntentDecision,
     IntentFallbackReason,
     IntentClassificationResult,
     IntentGoal,
+    EntityCandidate,
+    HybridIntentResult,
 )
 from customer_service.tasking.models import BusinessIntent
+
+# NLU_HYBRID_REFACTOR：导入混合策略和实体融合模块
+from customer_service.intents.hybrid_policy import (
+    HybridNLUSettings,
+    DEFAULT_SETTINGS,
+    evaluate_confidence_level,
+    should_call_llm,
+    fuse_intent,
+    ConfidenceLevel,
+)
+from customer_service.intents.entity_fusion import (
+    EntityFusionService,
+    llm_entities_to_candidates,
+    rule_entities_to_candidates,
+)
 
 # P0-2修复：导入结构化LLM分类器（可选）
 try:
@@ -110,6 +127,7 @@ class IntentClassifier:
             use_llm: 是否启用LLM分类器（默认False，使用关键词分类器）
         """
         self.use_llm = use_llm
+        self.enabled = use_llm  # NLU_HYBRID_REFACTOR：classify_hybrid 使用此标志
         self.llm_classifier = None
 
         if use_llm and _llm_classifier_available:
@@ -128,7 +146,10 @@ class IntentClassifier:
             IntentResult: 意图识别结果
         """
         text = message.strip()
-        entities = extract_entities(text)
+        # NLU_HYBRID_REFACTOR：使用新接口，entities 是 dict[str, EntityCandidate]
+        entity_candidates = extract_entities_with_candidates(text)
+        # 向后兼容：IntentResult.entities 仍使用 dict[str, Any]
+        entities = {k: v.value for k, v in entity_candidates.items()}
         scores: dict[str, float] = {}
 
         # P2修复（参考修改建议2第十节）：检测省略式追问
@@ -180,12 +201,17 @@ class IntentClassifier:
 
         # 优先级规则：售后意图 (退、换) 优先于尺码推荐
         if "换" in text and "exchange" in scores and "size_recommend" in scores:
-            # 如果包含"换"字，exchange意图加权
             scores["exchange"] = min(scores["exchange"] + 0.15, 0.97)
 
         if "退" in text and "return" in scores and "size_recommend" in scores:
-            # 如果包含"退"字，return意图加权
             scores["return"] = min(scores["return"] + 0.15, 0.97)
+
+        # 优先级规则：物流特征词出现时，logistics_query 优先于 product_query
+        # "查询订单 O20260811000004 的物流" 同时 hit "查"(product) + "物流/订单"(logistics)
+        _logistics_boost_triggers = ["物流", "快递", "发货", "运单", "订单号", "收货", "签收"]
+        if "logistics_query" in scores and "product_query" in scores:
+            if any(w in text for w in _logistics_boost_triggers):
+                scores["logistics_query"] = min(scores["logistics_query"] + 0.15, 0.97)
 
         # 实体推断：有颜色或价格但没有匹配到意图时，默认为商品查询
         if not scores and (entities.get("color") or entities.get("max_price")):
@@ -331,6 +357,241 @@ class IntentClassifier:
             candidate_intents=[business_intent] if decision == IntentDecision.CLARIFY else [],
             entities=entities,
         )
+
+    async def classify_hybrid(
+        self,
+        message: str,
+        *,
+        history: str | None = None,
+        context: dict | None = None,
+        active_intent: BusinessIntent | None = None,
+        nlu_settings: HybridNLUSettings | None = None,
+    ) -> HybridIntentResult:
+        """
+        NLU_HYBRID_REFACTOR：混合意图识别主入口（异步）
+
+        流程：
+        1. rule_classifier.classify() → 规则意图 + 置信度 + margin
+        2. extract_entities_with_candidates() → 规则实体（EntityCandidate）
+        3. hybrid_policy.should_call_llm() → 决策是否需要 LLM
+        4. 必要时 StructuredLLMClassifier.classify() → LLM 意图 + LLM 实体
+        5. fuse_intent() → 最终意图
+        6. EntityFusionService.merge() → 融合实体
+        7. 返回 HybridIntentResult（含可观测信息）
+
+        Args:
+            message: 当前用户消息
+            history: 历史对话摘要（LLM prompt 上下文用）
+            context: NLU 上下文（active_task / conversation_focus 等）
+            active_intent: 当前活跃意图（意图继承）
+            nlu_settings: Hybrid NLU 阈值配置
+        """
+        from loguru import logger
+
+        cfg = nlu_settings or DEFAULT_SETTINGS
+        fusion_svc = EntityFusionService()
+
+        # ---- Step 1: 规则分类 ----
+        rule_result = self.classify(message, history=history, active_intent=active_intent)
+        rule_intent_val = rule_result.intent.value if rule_result.intent else None
+        rule_conf = rule_result.confidence or 0.0
+        rule_margin = rule_result.margin
+
+        # ---- Step 2: 规则实体（带 EntityCandidate）----
+        rule_entity_candidates = extract_entities_with_candidates(message)
+        # 同步到 rule_result.entities（兼容旧逻辑）
+        rule_result.entities.update({k: v.value for k, v in rule_entity_candidates.items()})
+
+        rule_candidate_list = list(rule_entity_candidates.values())
+
+        _margin_str = f"{rule_margin:.3f}" if rule_margin is not None else "0.000"
+        logger.info(
+            f"[NLU] rule_intent={rule_intent_val} "
+            f"rule_confidence={rule_conf:.3f} "
+            f"margin={_margin_str} "
+            f"rule_entities={list(rule_entity_candidates.keys())}"
+        )
+
+        # ---- Step 3: Hybrid Policy 决策 ----
+        ambiguous = (
+            rule_result.decision == IntentDecision.CLARIFY
+            and rule_result.fallback_reason == IntentFallbackReason.MULTIPLE_INTENTS
+        )
+
+        # 为了决策实体完整性，先拿本意图要求的核心实体
+        required_core_entities = _get_core_entities_for_intent(rule_result.intent)
+        call_decision = should_call_llm(
+            confidence=rule_conf,
+            margin=rule_margin,
+            ambiguous=ambiguous,
+            required_entities=required_core_entities,
+            extracted_entities=rule_entity_candidates,
+            settings=cfg,
+        )
+
+        # ---- Step 4: LLM 分类（必要时）----
+        llm_called = False
+        llm_intent_val: str | None = None
+        llm_conf: float | None = None
+        llm_candidate_list: list[EntityCandidate] = []
+
+        if call_decision.should_call and self.llm_classifier and self.enabled:
+            llm_context = _build_llm_context(message, context, rule_result, history)
+            try:
+                llm_result = await self.llm_classifier.classify(
+                    message=message,
+                    context=llm_context,
+                    timeout=8.0,
+                )
+                llm_called = True
+
+                if not llm_result.classifier_error and llm_result.goals:
+                    top_goal = llm_result.goals[0]
+                    llm_intent_val = top_goal.intent.value
+                    llm_conf = top_goal.confidence
+
+                    # 提取 LLM 实体候选（来自 goal.entities dict）
+                    llm_raw = [
+                        {"name": k, "value": v, "confidence": top_goal.confidence or 0.8}
+                        for k, v in top_goal.entities.items()
+                        if v
+                    ]
+                    llm_candidate_list = llm_entities_to_candidates(llm_raw)
+
+                    logger.info(
+                        f"[NLU] llm_called=true "
+                        f"llm_intent={llm_intent_val} "
+                        f"llm_confidence={llm_conf:.3f} "
+                        f"llm_entities={[e.name for e in llm_candidate_list]}"
+                    )
+                else:
+                    logger.warning(
+                        f"[NLU] llm_called=true 但失败: {llm_result.classifier_error}"
+                    )
+
+            except Exception as e:
+                logger.error(f"[NLU] LLM 调用异常: {e}", exc_info=True)
+                llm_called = True  # 标记尝试过
+
+        else:
+            logger.info(
+                f"[NLU] llm_called=false reason='{call_decision.reason}'"
+            )
+
+        # ---- Step 5: 意图融合 ----
+        level = call_decision.level
+        final_intent_val, final_conf, source = fuse_intent(
+            rule_intent=rule_intent_val,
+            rule_confidence=rule_conf,
+            llm_intent=llm_intent_val if llm_called else None,
+            llm_confidence=llm_conf or 0.0,
+            level=level,
+            settings=cfg,
+        )
+
+        # 映射 intent 字符串到枚举
+        intent_map = {i.value: i for i in BusinessIntent}
+        final_intent = intent_map.get(final_intent_val) if final_intent_val else None
+        rule_intent_enum = intent_map.get(rule_intent_val) if rule_intent_val else None
+        llm_intent_enum = intent_map.get(llm_intent_val) if llm_intent_val else None
+
+        ambiguous_final = (final_intent is None and not rule_result.is_out_of_scope
+                           if hasattr(rule_result, 'is_out_of_scope') else final_intent is None)
+
+        # ---- Step 6: 实体融合 ----
+        context_entities: list[EntityCandidate] = []
+        if context and context.get("context_entity_candidates"):
+            context_entities = context["context_entity_candidates"]
+
+        fused_entities = fusion_svc.merge(
+            rule_entities=rule_candidate_list,
+            llm_entities=llm_candidate_list,
+            context_entities=context_entities,
+        )
+
+        logger.info(
+            f"[NLU] fusion_result intent={final_intent_val} "
+            f"confidence={final_conf:.3f} source={source} "
+            f"entity_sources={{{', '.join(f'{k}:{v.source}' for k, v in fused_entities.items())}}}"
+        )
+
+        return HybridIntentResult(
+            intent=final_intent,
+            confidence=final_conf,
+            source=source,
+            margin=rule_margin,
+            ambiguous=ambiguous_final,
+            entities=fused_entities,
+            llm_called=llm_called,
+            llm_intent=llm_intent_enum,
+            llm_confidence=llm_conf,
+            rule_intent=rule_intent_enum,
+            rule_confidence=rule_conf,
+            fallback_used=(llm_called and llm_intent_val is None),
+            is_out_of_scope=rule_result.decision == IntentDecision.OUT_OF_SCOPE,
+        )
+
+
+# ==================== NLU_HYBRID_REFACTOR：辅助函数 ====================
+
+def _get_core_entities_for_intent(intent: BusinessIntent | None) -> list[str]:
+    """
+    返回该意图的核心实体列表（用于决策是否需要 LLM 补全实体）。
+
+    NLU_HYBRID_REFACTOR 第9节：should_call_llm 要考虑 entity completeness。
+    这里只列 LLM 可能额外识别的核心实体（brand/product_name），
+    不包括 product_id/order_id（这些只能靠规则/业务验证，LLM 不允许生成）。
+    """
+    if intent is None:
+        return []
+    _core_map: dict[BusinessIntent, list[str]] = {
+        BusinessIntent.PRODUCT_QUERY: ["brand", "product_name"],
+        BusinessIntent.PROMOTION_QUERY: ["brand", "product_name"],
+        BusinessIntent.SIZE_RECOMMEND: ["brand", "product_name"],
+    }
+    return _core_map.get(intent, [])
+
+
+def _build_llm_context(
+    message: str,
+    context: dict | None,
+    rule_result,
+    history: str | None,
+) -> dict:
+    """
+    构建传给 StructuredLLMClassifier 的上下文。
+
+    NLU_HYBRID_REFACTOR 第8节：包含 active_task / rule_result / recent_messages 等，
+    不传整个 Redis State 或几十轮原始聊天。
+    """
+    nlu_ctx: dict = {}
+
+    if context:
+        if context.get("active_task_intent"):
+            nlu_ctx["active_task_intent"] = context["active_task_intent"]
+        if context.get("active_task_status"):
+            nlu_ctx["active_task_status"] = context["active_task_status"]
+        if context.get("missing_slots"):
+            nlu_ctx["missing_slots"] = context["missing_slots"]
+        if context.get("conversation_focus"):
+            nlu_ctx["conversation_focus"] = context["conversation_focus"]
+        if context.get("last_business_intent"):
+            nlu_ctx["last_business_intent"] = context["last_business_intent"]
+
+    # 传入规则分类器的结果（辅助 LLM 做判断）
+    if rule_result.intent:
+        nlu_ctx["rule_intent"] = rule_result.intent.value
+    if rule_result.confidence:
+        nlu_ctx["rule_confidence"] = f"{rule_result.confidence:.2f}"
+    if rule_result.entities:
+        nlu_ctx["rule_entities"] = rule_result.entities
+
+    # 阶段2-任务4：增加历史对话到10轮（参考TurnPlanner传10轮）
+    if history:
+        lines = history.strip().split("\n")
+        nlu_ctx["recent_messages"] = "\n".join(lines[-20:])  # 约10轮（每轮2行：USER+ASSISTANT）
+
+    return nlu_ctx
 
 
 def _detect_independent_goals(text: str, intent1: str, intent2: str | None) -> bool:

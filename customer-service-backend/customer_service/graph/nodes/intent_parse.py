@@ -47,6 +47,7 @@ from customer_service.intents.models import (
     TurnAction,
     IntentClassificationResult,
     TurnDecision,
+    HybridIntentResult,  # NLU_HYBRID_REFACTOR
 )
 from customer_service.intents.policies import get_intent_policy
 from customer_service.tasking.models import PendingIntentSelection
@@ -270,17 +271,16 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
         logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（历史查询）===")
         return state
 
-    # ===== 阶段1重构：三层架构（分类器→验证器→决策）=====
-    # P1-40修复：从数据库获取历史对话，传递给分类器增强上下文理解
+    # ===== NLU_HYBRID_REFACTOR：混合NLU三层架构 =====
+    # 流程：Context Resolver → classify_hybrid（Rule + LLM Hybrid）→ Validator → TurnAction
+    # P1-40修复：从数据库获取历史对话
     # P0修复：必须传入config参数以获取runtime.session_id
-    # P2修复：传入active_intent支持意图继承
     # P2修复（修改建议2第十节）：先调用Context Resolver解析上下文
 
     # 获取历史对话
     history_str = await _get_conversation_history(state, config, turn_id)
 
     # ===== P2修复：Context Resolver（规则优先）=====
-    # 在意图分类之前，先解析上下文（省略式追问、指代消解、补槽等）
     from customer_service.graph.task_context_manager import _ensure_dialogue_frame
 
     dialogue_frame = _ensure_dialogue_frame(state)
@@ -302,37 +302,222 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
     if context_resolution.reasoning:
         logger.info(f"[{turn_id}] 💡 推理: {context_resolution.reasoning}")
 
-    # 获取当前活跃意图（用于意图继承）
-    # 优先使用Context Resolver解析的inherited_intent
-    active_intent = context_resolution.inherited_intent or (active_task.intent if active_task else None)
-
-    logger.info(f"[{turn_id}] 当前活跃意图: {active_intent.value if active_intent else '无'}")
-
-    # 第1层：分类器 - 提出候选目标（传入历史对话和活跃意图）
-    classifier = IntentClassifier()
-    old_result = classifier.classify(current_message, history=history_str, active_intent=active_intent)
-
-    # P2修复：如果是意图继承（inherited=True），从消息中提取新的商品ID
-    # "那29570呢？" 应该继承意图，但更新商品ID到29570
-    # 同时合并Context Resolver提取的实体
-    if old_result.inherited and old_result.entities:
-        from customer_service.intents.entity_extractor import extract_entities
-        # 重新提取实体，确保获取最新的商品ID
-        fresh_entities = extract_entities(current_message)
-        if fresh_entities.get("product_id"):
-            old_result.entities["product_id"] = fresh_entities["product_id"]
-            logger.info(
-                f"[{turn_id}] 🔄 意图继承，更新商品ID: {fresh_entities['product_id']}"
-            )
-
-    # 合并Context Resolver提取的实体更新
-    if context_resolution.entity_updates:
-        old_result.entities.update(context_resolution.entity_updates)
+    # P0-1修复：如果ContextResolver已经确定意图继承，直接使用，跳过classify_hybrid
+    if context_resolution.mode == "repeat_last_intent" and context_resolution.inherited_intent:
         logger.info(
-            f"[{turn_id}] 🔄 合并Context实体: {context_resolution.entity_updates}"
+            f"[{turn_id}] ✅ ContextResolver已确定意图继承，跳过classify_hybrid "
+            f"intent={context_resolution.inherited_intent.value}"
         )
 
-    # 第2层：适配器 - 转换为新格式
+        # 获取IntentPolicy（使用已导入的函数）
+        policy = get_intent_policy(context_resolution.inherited_intent)
+        action_mode = ActionMode.ACTION_REQUEST if policy.requires_action_request else ActionMode.INFORMATIONAL
+
+        # 直接构造IntentResult
+        old_result = IntentResult(
+            recognized=True,
+            intent=context_resolution.inherited_intent,
+            decision=IntentDecision.ACCEPT,
+            confidence=context_resolution.confidence,
+            entities=context_resolution.entity_updates,
+            action_mode=action_mode,
+            inherited=True,  # 标记为继承的意图
+        )
+
+        # 跳转到验证器（第3层）
+        classification: IntentClassificationResult = adapt_intent_result_to_classification(
+            old_result,
+            current_message
+        )
+        validator = IntentDecisionValidator()
+        decision: TurnDecision = validator.validate(state, classification)
+
+        logger.info(
+            f"[NLU] [{turn_id}] turn_action={decision.action.value} (inherited)"
+        )
+
+        state["turn_action"] = decision.action
+
+        # 处理决策（复用后面的决策处理逻辑）
+        # 因为是继承意图，直接接受
+        if decision.action == TurnAction.ACCEPT and decision.accepted_goal:
+            intent = decision.accepted_goal.intent
+            entities = decision.accepted_goal.entities
+
+            state["intent_result"] = IntentResult(
+                recognized=True,
+                intent=intent,
+                decision=IntentDecision.ACCEPT,
+                confidence=context_resolution.confidence,
+                entities=entities,
+                action_mode=action_mode,
+                inherited=True,
+            )
+
+            # 使用 CommandProcessor 执行命令
+            if decision.commands:
+                processor = TaskCommandProcessor()
+                state = processor.run(state, decision.commands, turn_id)
+                logger.info(f"[{turn_id}] 🔧 执行了 {len(decision.commands)} 条命令")
+
+            logger.info(f"[{turn_id}] === 节点 1: Intent Parse 完成（继承意图）===")
+            return state
+        else:
+            # 如果验证器拒绝了继承的意图，继续走正常分类流程
+            logger.warning(f"[{turn_id}] ⚠️ 验证器拒绝继承意图，继续走正常分类")
+
+    # 获取当前活跃意图（用于意图继承）
+    active_intent = context_resolution.inherited_intent or (active_task.intent if active_task else None)
+    logger.info(f"[{turn_id}] 当前活跃意图: {active_intent.value if active_intent else '无'}")
+
+    # ===== NLU_HYBRID_REFACTOR：构建 NLU 上下文（传给 LLM Classifier）=====
+    # P0-2修复：添加focused_object到nlu_context
+    # 阶段2-任务4：完善nlu_context结构，参考TurnPlanner
+    nlu_context: dict = {
+        "active_task_intent": active_intent.value if active_intent else None,
+        "active_task_status": active_task.status.value if active_task and hasattr(active_task, "status") else None,
+        "missing_slots": getattr(active_task, "missing_slots", None) if active_task else None,
+        "conversation_focus": (
+            f"{context_resolution.inherited_intent.value}" if context_resolution.inherited_intent else None
+        ),
+        "last_business_intent": (
+            dialogue_frame.last_business_intent.value
+            if dialogue_frame and getattr(dialogue_frame, "last_business_intent", None)
+            else None
+        ),
+    }
+
+    # P0-2修复：传递focused_object（从dialogue_frame.last_focus获取）
+    if dialogue_frame and hasattr(dialogue_frame, "last_focus") and dialogue_frame.last_focus:
+        focus = dialogue_frame.last_focus
+        nlu_context["focused_object"] = {
+            "entity_type": focus.entity_type,
+            "entity_id": focus.entity_id,
+        }
+        logger.info(
+            f"[{turn_id}] 📌 Focused Object: {focus.entity_type}={focus.entity_id}"
+        )
+
+    # P0-2修复：传递paused_tasks（如果有）
+    paused_tasks = state.get("paused_tasks", [])
+    if paused_tasks:
+        paused_intents = [
+            task.intent.value if hasattr(task, "intent") else None
+            for task in paused_tasks
+        ]
+        nlu_context["paused_tasks"] = [i for i in paused_intents if i]
+        logger.info(f"[{turn_id}] ⏸️ Paused Tasks: {nlu_context['paused_tasks']}")
+
+    # 阶段2-任务4：传递available_intents列表（让LLM知道系统支持哪些意图）
+    from customer_service.intents.validator import SUPPORTED_INTENTS
+    nlu_context["available_intents"] = [intent.value for intent in SUPPORTED_INTENTS]
+
+    # 阶段2-任务4：传递完整的active_task信息（而非只传intent）
+    if active_task:
+        nlu_context["active_task_full"] = {
+            "intent": active_task.intent.value if hasattr(active_task, "intent") else None,
+            "status": active_task.status.value if hasattr(active_task, "status") else None,
+            "slots": getattr(active_task, "slots", {}),
+            "missing_slots": getattr(active_task, "missing_slots", []),
+        }
+
+    # 阶段2-任务4：传递完整的paused_tasks信息
+    if paused_tasks:
+        nlu_context["paused_tasks_full"] = [
+            {
+                "intent": task.intent.value if hasattr(task, "intent") else None,
+                "status": task.status.value if hasattr(task, "status") else None,
+            }
+            for task in paused_tasks
+            if hasattr(task, "intent")
+        ]
+
+    # 从 Context Resolver 继承的实体作为上下文实体候选
+    if context_resolution.entity_updates:
+        from customer_service.intents.entity_fusion import rule_entities_to_candidates
+        ctx_entity_candidates = rule_entities_to_candidates(
+            context_resolution.entity_updates, base_confidence=0.80
+        )
+        nlu_context["context_entity_candidates"] = ctx_entity_candidates
+
+    # ===== 第1层：Hybrid NLU 分类（Rule + LLM）=====
+    # NLU_HYBRID_REFACTOR：使用 classify_hybrid 替代旧的 classify
+    # 注意：use_llm=True 才会真正调用 LLM；生产环境可从配置读取
+    from customer_service.config.config import settings as app_settings
+    use_llm_flag = getattr(app_settings, "nlu_use_llm", False)
+
+    classifier = IntentClassifier(use_llm=use_llm_flag)
+    hybrid_result = await classifier.classify_hybrid(
+        current_message,
+        history=history_str,
+        context=nlu_context,
+        active_intent=active_intent,
+    )
+
+    # NLU_HYBRID_REFACTOR：结构化可观测日志（第20节要求）
+    _rule_conf_str = f"{hybrid_result.rule_confidence:.3f}" if hybrid_result.rule_confidence is not None else "0.000"
+    _margin_str = f"{hybrid_result.margin:.3f}" if hybrid_result.margin is not None else "0.000"
+    _llm_conf_str = f"{hybrid_result.llm_confidence:.3f}" if hybrid_result.llm_confidence is not None else "0.000"
+    logger.info(
+        f"[NLU] [{turn_id}]\n"
+        f"  rule_intent={hybrid_result.rule_intent.value if hybrid_result.rule_intent else 'None'}\n"
+        f"  rule_confidence={_rule_conf_str}\n"
+        f"  margin={_margin_str}\n"
+        f"  llm_called={hybrid_result.llm_called}\n"
+        f"  llm_intent={hybrid_result.llm_intent.value if hybrid_result.llm_intent else 'None'}\n"
+        f"  llm_confidence={_llm_conf_str}\n"
+        f"  entity_sources={{{', '.join(f'{k}:{v.source}' for k, v in hybrid_result.entities.items())}}}\n"
+        f"  final_intent={hybrid_result.intent.value if hybrid_result.intent else 'None'}\n"
+        f"  final_confidence={hybrid_result.confidence:.3f}\n"
+        f"  source={hybrid_result.source}\n"
+        f"  ambiguous={hybrid_result.ambiguous}"
+    )
+
+    # ===== 第2层：将 HybridIntentResult 转换为旧 IntentResult（向后兼容）=====
+    # NLU_HYBRID_REFACTOR：HybridResult → old_result → adapt_intent_result_to_classification
+    # 保持 Validator 不变，只替换 NLU 层
+    if hybrid_result.ambiguous and hybrid_result.intent is None:
+        # 意图歧义/冲突 → CLARIFY（模拟旧的多意图路径）
+        old_result = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.CLARIFY,
+            fallback_reason=IntentFallbackReason.MULTIPLE_INTENTS,
+            confidence=hybrid_result.confidence,
+            entities=hybrid_result.to_entities_dict(),
+        )
+    elif hybrid_result.is_out_of_scope:
+        old_result = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.OUT_OF_SCOPE,
+            confidence=hybrid_result.confidence,
+            entities=hybrid_result.to_entities_dict(),
+        )
+    elif hybrid_result.intent is None:
+        old_result = IntentResult(
+            recognized=False,
+            intent=None,
+            decision=IntentDecision.CLARIFY,
+            fallback_reason=IntentFallbackReason.LOW_CONFIDENCE,
+            confidence=hybrid_result.confidence,
+            entities=hybrid_result.to_entities_dict(),
+        )
+    else:
+        old_result = IntentResult(
+            recognized=True,
+            intent=hybrid_result.intent,
+            decision=IntentDecision.ACCEPT,
+            confidence=hybrid_result.confidence,
+            margin=hybrid_result.margin,
+            entities=hybrid_result.to_entities_dict(),
+        )
+
+    # 合并Context Resolver提取的实体更新（已经在 nlu_context 里参与了融合，这里兜底更新）
+    if context_resolution.entity_updates:
+        old_result.entities.update(context_resolution.entity_updates)
+
+    # ===== 第3层：适配器 → 验证器 → TurnAction =====
     classification: IntentClassificationResult = adapt_intent_result_to_classification(
         old_result,
         current_message
@@ -342,7 +527,10 @@ async def intent_parse_node(state: AgentState, config: RunnableConfig) -> AgentS
     validator = IntentDecisionValidator()
     decision: TurnDecision = validator.validate(state, classification)
 
-    logger.info(f"[{turn_id}] 🔍 决策结果: action={decision.action.value}, reason={decision.reason}")
+    logger.info(
+        f"[NLU] [{turn_id}] turn_action={decision.action.value} "
+        f"missing_slots={getattr(active_task, 'missing_slots', None)}"
+    )
 
     # ===== 根据 TurnDecision.action 设置 turn_action 和状态 =====
     state["turn_action"] = decision.action
